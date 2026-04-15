@@ -24,74 +24,8 @@ local function parse_file()
 	return items
 end
 
--- 搜索匹配
-local function match(item, query)
-	if not query or query == "" then
-		return true
-	end
-
-	local q = query:lower()
-
-	local text = table.concat(item.content or {}, " "):lower()
-	local type = (item.type or ""):lower()
-
-	return text:find(q, 1, true) or type:find(q, 1, true)
-end
-
--- 高亮函数（类似搜索引擎）
-local function highlight_text(text, query)
-	if not query or query == "" then
-		return { { text, "Normal" } }
-	end
-
-	local result = {}
-
-	local lower_text = text:lower()
-	local lower_query = query:lower()
-
-	local i = 1
-
-	while true do
-		local s, e = lower_text:find(lower_query, i, true)
-		if not s then
-			break
-		end
-
-		if s > i then
-			table.insert(result, {
-				text:sub(i, s - 1),
-				"Normal",
-			})
-		end
-
-		table.insert(result, {
-			text:sub(s, e),
-			"TelescopeMatching",
-		})
-
-		i = e + 1
-	end
-
-	if i <= #text then
-		table.insert(result, {
-			text:sub(i),
-			"Normal",
-		})
-	end
-
-	return result
-end
-
 function M.open(query_arg)
 	local items = parse_file()
-
-	local filtered = {}
-
-	for _, item in ipairs(items) do
-		if match(item, query_arg) then
-			table.insert(filtered, item)
-		end
-	end
 
 	local pickers = require("telescope.pickers")
 	local finders = require("telescope.finders")
@@ -102,28 +36,26 @@ function M.open(query_arg)
 	pickers
 		.new({}, {
 			prompt_title = "Edit Tools History",
+
 			finder = finders.new_table({
-				results = filtered,
+				results = items,
 
 				entry_maker = function(entry)
 					local text = table.concat(entry.content or {}, " ")
-					local query = vim.fn.getreg("/") -- Telescope 搜索词
 
 					return {
 						value = entry,
 
-						display = function()
-							return {
-								{ string.format("[%s] %-5s ", entry.time, entry.type), "Comment" },
-								unpack(highlight_text(text, query)),
-							}
-						end,
+						-- ⭐ 只做展示，不做任何 highlight 逻辑
+						display = string.format("[%s] %-5s %s", entry.time or "", entry.type or "", text),
 
-						ordinal = text .. " " .. entry.type,
+						-- ⭐ 让 Telescope 负责 fuzzy search
+						ordinal = (entry.type or "") .. " " .. text,
 					}
 				end,
 			}),
 
+			-- ⭐ Telescope 自己做排序 + 高亮
 			sorter = conf.generic_sorter({}),
 
 			attach_mappings = function(prompt_bufnr, map)
@@ -150,9 +82,9 @@ function M.open(query_arg)
 		:find()
 end
 
--- command: :History
+-- :History command
 vim.api.nvim_create_user_command("History", function(opts)
-	require("edit_tools.telescope").open(opts.args)
+	M.open(opts.args)
 end, {
 	nargs = "*",
 })
