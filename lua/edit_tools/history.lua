@@ -54,7 +54,7 @@ function M.save_visual_selection()
 end
 
 function M.setup()
-	vim.keymap.set("v", "<leader>k", M.save_visual_selection, {
+	vim.keymap.set("v", "<leader>is", M.save_visual_selection, {
 		desc = "Save snippet (auto typed)",
 		silent = true,
 	})
