@@ -3,7 +3,7 @@ local M = {}
 local function get_file()
 	local dir = vim.fn.stdpath("data") .. "/edit-tools"
 	vim.fn.mkdir(dir, "p")
-	return dir .. "/history.jsonl"
+	return dir .. "/knowledge.jsonl"
 end
 
 local function detect_type(lines)
@@ -22,6 +22,29 @@ local function detect_type(lines)
 	end
 
 	return "text"
+end
+
+local function detect_tags(lines)
+	local text = table.concat(lines, "\n")
+	local tags = {}
+
+	if text:match("vim%.") or text:match("nvim") then
+		table.insert(tags, "neovim")
+	end
+
+	if text:match("SELECT%s") then
+		table.insert(tags, "sql")
+	end
+
+	if text:match("function%s") then
+		table.insert(tags, "lua")
+	end
+
+	if text:match("%d+%.%d+%.%d+%.%d+") then
+		table.insert(tags, "network")
+	end
+
+	return tags
 end
 
 function M.save_visual_selection()
@@ -43,8 +66,18 @@ function M.save_visual_selection()
 
 	local entry = {
 		time = os.date("%Y-%m-%d %H:%M:%S"),
+
+		-- 结构分类（保留）
 		type = detect_type(lines),
-		content = lines,
+
+		-- 语义标签（新增）
+		tags = detect_tags(lines),
+
+		-- 标题
+		title = lines[1] and lines[1]:sub(1, 80) or "untitled",
+
+		-- 内容
+		content = table.concat(lines, "\n"),
 	}
 
 	file:write(vim.json.encode(entry) .. "\n")
