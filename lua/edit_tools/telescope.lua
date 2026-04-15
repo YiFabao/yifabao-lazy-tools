@@ -93,6 +93,9 @@ function M.open()
 							entry.text or "",
 						}, " "),
 
+						-- Add display_name for better preview handling
+						display_name = entry.time .. " [" .. (entry.type or "") .. "] " .. preview,
+
 						-- =========================
 						-- UI rendering only
 						-- =========================
@@ -108,15 +111,33 @@ function M.open()
 			}),
 
 			-- =========================
-			-- fuzzy sorter (Telescope default engine)
+			-- fuzzy sorter (Telescope default engine) with highlights
 			-- =========================
 			sorter = conf.generic_sorter({}),
 
 			-- =========================
-			-- preview panel (right side)
+			-- Custom previewer that shows the full content
 			-- =========================
-			-- previewer = require("telescope.previewers").vim_buffer_cat.new({}),
-			previewer = nil,
+			previewer = (function()
+				local builtin_previewer = require("telescope.previewers").builtin
+				return builtin_previewer.new({
+					title = "Full Content",
+					-- Define how to show the preview
+					define_preview = function(self, entry, status)
+						if not entry or not entry.value then
+							vim.api.nvim_buf_set_lines(self.state.bufnr, 0, -1, false, { "" })
+							return
+						end
+
+						local content = entry.value.text or ""
+						local lines = vim.split(content, "\n")
+
+						vim.api.nvim_buf_set_lines(self.state.bufnr, 0, -1, false, lines)
+						vim.api.nvim_buf_set_option(self.state.bufnr, "filetype", "markdown") -- Set appropriate filetype
+						vim.api.nvim_buf_set_option(self.state.bufnr, "buftype", "nofile")
+					end,
+				})
+			end)(),
 
 			-- =========================
 			-- actions
