@@ -115,7 +115,8 @@ function M.open()
 			-- =========================
 			-- preview panel (right side)
 			-- =========================
-			previewer = require("telescope.previewers").vim_buffer_cat.new({}),
+			-- previewer = require("telescope.previewers").vim_buffer_cat.new({}),
+			previewer = nil,
 
 			-- =========================
 			-- actions
