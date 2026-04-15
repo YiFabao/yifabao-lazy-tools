@@ -1,45 +1,155 @@
 local M = {}
 
-local function get_file()
-	local dir = vim.fn.stdpath("data") .. "/edit-tools"
-	vim.fn.mkdir(dir, "p")
-	return dir .. "/knowledge.jsonl"
+local sqlite = require("sqlite")
+local db = nil
+
+-- =========================
+-- path / db lifecycle
+-- =========================
+local function db_path()
+	return vim.fn.stdpath("data") .. "/edit-tools/knowledge.db"
 end
 
-local function detect_type(lines)
-	local text = table.concat(lines, "\n")
+local function ensure_dir()
+	local dir = vim.fn.fnamemodify(db_path(), ":h")
+	vim.fn.mkdir(dir, "p")
+end
 
+local function init_db()
+	ensure_dir()
+
+	db = sqlite({
+		uri = db_path(),
+	})
+
+	db:open()
+
+	db:eval([[
+    CREATE TABLE IF NOT EXISTS knowledge (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      time TEXT NOT NULL,
+      type TEXT NOT NULL,
+      tags TEXT DEFAULT '',
+      title TEXT DEFAULT '',
+      content TEXT NOT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+  ]])
+
+	db:eval([[
+    CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_fts USING fts5(
+      title, content, tags,
+      prefix='2 3 4',
+      content='knowledge',
+      content_rowid='id'
+    );
+  ]])
+
+	db:eval([[
+    CREATE TRIGGER IF NOT EXISTS knowledge_ai AFTER INSERT ON knowledge BEGIN
+      INSERT INTO knowledge_fts(rowid, title, content, tags)
+      VALUES (new.id, new.title, new.content, new.tags);
+    END;
+  ]])
+
+	db:eval([[
+    CREATE TRIGGER IF NOT EXISTS knowledge_ad AFTER DELETE ON knowledge BEGIN
+      INSERT INTO knowledge_fts(knowledge_fts, rowid, title, content, tags)
+      VALUES('delete', old.id, old.title, old.content, old.tags);
+    END;
+  ]])
+
+	db:eval([[
+    CREATE TRIGGER IF NOT EXISTS knowledge_au AFTER UPDATE ON knowledge BEGIN
+      INSERT INTO knowledge_fts(knowledge_fts, rowid, title, content, tags)
+      VALUES('delete', old.id, old.title, old.content, old.tags);
+      INSERT INTO knowledge_fts(rowid, title, content, tags)
+      VALUES (new.id, new.title, new.content, new.tags);
+    END;
+  ]])
+end
+
+local function ensure_db()
+	if not db then
+		init_db()
+	end
+end
+
+-- =========================
+-- helpers
+-- =========================
+local function split_tags(tag_str)
+	local tags = {}
+	if tag_str and tag_str ~= "" then
+		for tag in tag_str:gmatch("[^,]+") do
+			table.insert(tags, vim.trim(tag))
+		end
+	end
+	return tags
+end
+
+local function rows_to_items(rows)
+	if type(rows) ~= "table" then
+		return {}
+	end
+
+	local items = {}
+
+	for _, row in ipairs(rows) do
+		table.insert(items, {
+			id = row.id,
+			time = row.time,
+			type = row.type,
+			tags = split_tags(row.tags),
+			title = row.title or "",
+			text = row.content or "",
+			raw = row,
+		})
+	end
+
+	return items
+end
+
+local function escape_fts(query)
+	query = query or ""
+	query = query:gsub("'", "''")
+	return query
+end
+
+local function parse_tag_query(query)
+	local tag = query:match("tag:(%S+)")
+	local clean = query:gsub("tag:%S+", ""):gsub("^%s+", ""):gsub("%s+$", "")
+	return tag, clean
+end
+
+-- =========================
+-- type / tags detect
+-- =========================
+local function detect_type(text)
 	if text:match("%d+%.%d+%.%d+%.%d+/%d+") then
 		return "ip"
 	end
-
-	if text:match("SELECT%s") or text:match("INSERT%s") or text:match("UPDATE%s") then
+	if text:match("SELECT%s") or text:match("INSERT%s") then
 		return "sql"
 	end
-
-	if text:match("func%s") or text:match("function%s") or text:match("class%s") then
+	if text:match("function%s") or text:match("class%s") then
 		return "code"
 	end
-
 	return "text"
 end
 
-local function detect_tags(lines)
-	local text = table.concat(lines, "\n")
+local function detect_tags(text)
 	local tags = {}
 
 	if text:match("vim%.") or text:match("nvim") then
 		table.insert(tags, "neovim")
 	end
-
 	if text:match("SELECT%s") then
 		table.insert(tags, "sql")
 	end
-
 	if text:match("function%s") then
 		table.insert(tags, "lua")
 	end
-
 	if text:match("%d+%.%d+%.%d+%.%d+") then
 		table.insert(tags, "network")
 	end
@@ -47,49 +157,305 @@ local function detect_tags(lines)
 	return tags
 end
 
+-- =========================
+-- CRUD
+-- =========================
+local function save_content(content)
+	ensure_db()
+
+	if not content or content == "" then
+		vim.notify("没有内容可以保存", vim.log.levels.WARN)
+		return
+	end
+
+	local lines = vim.split(content, "\n")
+	local text = table.concat(lines, "\n")
+	local tags = detect_tags(text)
+
+	db:insert("knowledge", {
+		time = os.date("%Y-%m-%d %H:%M:%S"),
+		type = detect_type(text),
+		tags = table.concat(tags, ","),
+		title = lines[1] and lines[1]:sub(1, 80) or "Pasted Content",
+		content = text,
+	})
+
+	vim.notify("知识已保存", vim.log.levels.INFO)
+end
+
+local function delete_entry(id)
+	ensure_db()
+	db:eval("DELETE FROM knowledge WHERE id = " .. tonumber(id))
+end
+
+local function list_recent(limit)
+	ensure_db()
+
+	local rows = db:eval(string.format(
+		[[
+    SELECT id, time, type, tags, title, content
+    FROM knowledge
+    ORDER BY time DESC
+    LIMIT %d
+  ]],
+		limit or 100
+	))
+
+	return rows_to_items(rows)
+end
+
+local function search_db(query, limit)
+	ensure_db()
+	-- vim.notify("查询数据库", vim.log.levels.INFO)
+
+	if not query or query == "" then
+		return list_recent(limit)
+	end
+
+	local tag, clean = parse_tag_query(query)
+	local conditions = {}
+
+	-- 1) FTS 子查询
+	if clean ~= "" then
+		table.insert(
+			conditions,
+			string.format(
+				[[
+      k.id IN (
+        SELECT rowid
+        FROM knowledge_fts
+        WHERE knowledge_fts MATCH '%s'
+      )
+    ]],
+				escape_fts(clean)
+			)
+		)
+	end
+
+	-- 2) tag 条件
+	if tag then
+		table.insert(conditions, string.format("k.tags LIKE '%%%s%%'", tag))
+	end
+
+	local where_sql = ""
+	if #conditions > 0 then
+		where_sql = "WHERE " .. table.concat(conditions, " AND ")
+	end
+
+	local sql = string.format(
+		[[
+    SELECT k.id, k.time, k.type, k.tags, k.title, k.content
+    FROM knowledge k
+    %s
+    ORDER BY k.time DESC
+    LIMIT %d
+  ]],
+		where_sql,
+		limit or 100
+	)
+
+	local ok, rows = pcall(function()
+		return db:eval(sql)
+	end)
+
+	if not ok or type(rows) ~= "table" then
+		return {}
+	end
+
+	return rows_to_items(rows)
+end
+-- =========================
+-- UI save methods
+-- =========================
 function M.save_visual_selection()
-	local s = vim.fn.getpos("'<")
-	local e = vim.fn.getpos("'>")
+	local bufnr = 0
 
-	local lines = vim.api.nvim_buf_get_lines(0, s[2] - 1, e[2], false)
+	local mode = vim.fn.mode()
 
-	if #lines == 0 then
+	if mode ~= "v" and mode ~= "V" and mode ~= "\22" then
+		vim.notify("请在 visual 模式下使用", vim.log.levels.WARN)
+		return
+	end
+
+	-- ⭐ 关键：用 getregion（Neovim 0.8+ 稳定 API）
+	local lines = vim.fn.getregion(vim.fn.getpos("v"), vim.fn.getpos("."), { type = mode })
+
+	if not lines or #lines == 0 then
 		vim.notify("空选区", vim.log.levels.WARN)
 		return
 	end
 
-	local file = io.open(get_file(), "a")
-	if not file then
-		vim.notify("无法写入 history", vim.log.levels.ERROR)
+	local content = table.concat(lines, "\n")
+
+	if content:match("^%s*$") then
+		vim.notify("选区为空", vim.log.levels.WARN)
 		return
 	end
 
-	local entry = {
-		time = os.date("%Y-%m-%d %H:%M:%S"),
-
-		-- 结构分类（保留）
-		type = detect_type(lines),
-
-		-- 语义标签（新增）
-		tags = detect_tags(lines),
-
-		-- 标题
-		title = lines[1] and lines[1]:sub(1, 80) or "untitled",
-
-		-- 内容
-		content = table.concat(lines, "\n"),
-	}
-
-	file:write(vim.json.encode(entry) .. "\n")
-	file:close()
-
-	vim.notify("已保存: " .. entry.type, vim.log.levels.INFO)
+	save_content(content)
 end
 
+function M.paste_from_clipboard()
+	save_content(vim.fn.getreg("+"))
+end
+
+function M.open_paste_window()
+	local buf = vim.api.nvim_create_buf(false, true)
+	local width = math.floor(vim.o.columns * 0.7)
+	local height = math.floor(vim.o.lines * 0.6)
+
+	local win = vim.api.nvim_open_win(buf, true, {
+		relative = "editor",
+		width = width,
+		height = height,
+		row = math.floor((vim.o.lines - height) / 2),
+		col = math.floor((vim.o.columns - width) / 2),
+		border = "rounded",
+		style = "minimal",
+	})
+
+	vim.api.nvim_buf_set_lines(buf, 0, -1, false, {
+		"=== 粘贴知识窗口 ===",
+		"",
+		"下面开始输入",
+		"",
+	})
+
+	vim.api.nvim_win_set_cursor(win, { 4, 0 })
+
+	vim.keymap.set("n", "<C-s>", function()
+		local lines = vim.api.nvim_buf_get_lines(buf, 3, -1, false)
+		save_content(table.concat(lines, "\n"))
+		vim.api.nvim_buf_delete(buf, { force = true })
+	end, { buffer = buf })
+
+	vim.keymap.set("n", "q", function()
+		vim.api.nvim_buf_delete(buf, { force = true })
+	end, { buffer = buf })
+end
+
+-- =========================
+-- telescope
+-- =========================
+function M.open()
+	local pickers = require("telescope.pickers")
+	local finders = require("telescope.finders")
+	local previewers = require("telescope.previewers")
+	local conf = require("telescope.config").values
+	local actions = require("telescope.actions")
+	local action_state = require("telescope.actions.state")
+
+	pickers
+		.new({}, {
+			prompt_title = "Knowledge Base",
+			finder = finders.new_dynamic({
+				fn = function(prompt)
+					return search_db(prompt, 100)
+				end,
+				entry_maker = function(entry)
+					local preview = entry.text:gsub("\n", " ")
+					preview = preview:sub(1, 80)
+
+					return {
+						value = entry,
+						display = string.format(
+							"%-19s %-8s %-20s %s",
+							entry.time,
+							entry.type,
+							table.concat(entry.tags, ","),
+							preview
+						),
+						ordinal = table.concat({
+							entry.title,
+							entry.text,
+							table.concat(entry.tags, " "),
+						}, " "),
+					}
+				end,
+			}),
+			sorter = conf.generic_sorter({}),
+			previewer = previewers.new_buffer_previewer({
+				define_preview = function(self, entry)
+					vim.api.nvim_buf_set_lines(self.state.bufnr, 0, -1, false, vim.split(entry.value.text, "\n"))
+				end,
+			}),
+			attach_mappings = function(prompt_bufnr, map)
+				local function insert_entry()
+					local selection = action_state.get_selected_entry()
+					actions.close(prompt_bufnr)
+					vim.api.nvim_put(vim.split(selection.value.text, "\n"), "c", true, true)
+				end
+
+				local function delete_current()
+					local selection = action_state.get_selected_entry()
+					delete_entry(selection.value.id)
+					actions.close(prompt_bufnr)
+					vim.schedule(M.open)
+				end
+
+				map("i", "<CR>", insert_entry)
+				map("n", "<CR>", insert_entry)
+				map("i", "dd", delete_current)
+				map("n", "dd", delete_current)
+
+				return true
+			end,
+		})
+		:find()
+end
+
+-- =========================
+-- migration
+-- =========================
+function M.migrate_from_jsonl()
+	ensure_db()
+
+	local file_path = vim.fn.stdpath("data") .. "/edit-tools/knowledge.jsonl"
+	if vim.fn.filereadable(file_path) == 0 then
+		vim.notify("没有 JSONL 文件", vim.log.levels.INFO)
+		return
+	end
+
+	for line in io.lines(file_path) do
+		local ok, obj = pcall(vim.json.decode, line)
+		if ok and obj then
+			db:insert("knowledge", {
+				time = obj.time or os.date("%Y-%m-%d %H:%M:%S"),
+				type = obj.type or "text",
+				tags = table.concat(obj.tags or {}, ","),
+				title = obj.title or "",
+				content = obj.content or "",
+			})
+		end
+	end
+
+	vim.notify("JSONL 迁移完成", vim.log.levels.INFO)
+end
+
+-- =========================
+-- setup
+-- =========================
 function M.setup()
+	ensure_db()
+
 	vim.keymap.set("v", "<leader>is", M.save_visual_selection, {
-		desc = "Save snippet (auto typed)",
-		silent = true,
+		desc = "Save visual selection",
+	})
+
+	vim.keymap.set("n", "<leader>iv", M.paste_from_clipboard, {
+		desc = "Save clipboard",
+	})
+
+	vim.keymap.set("n", "<leader>ip", M.open_paste_window, {
+		desc = "Paste window",
+	})
+
+	vim.keymap.set("n", "<leader>ik", M.open, {
+		desc = "Knowledge search",
+	})
+
+	vim.keymap.set("n", "<leader>im", M.migrate_from_jsonl, {
+		desc = "Migrate JSONL",
 	})
 end
 
