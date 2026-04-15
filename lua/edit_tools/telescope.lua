@@ -70,8 +70,7 @@ function M.open()
 			prompt_title = "Knowledge Base",
 
 			-- =========================
-			-- search source (IMPORTANT)
-			-- Telescope handles fuzzy + highlight
+			-- search source
 			-- =========================
 			finder = finders.new_table({
 				results = items,
@@ -84,60 +83,67 @@ function M.open()
 					end
 
 					return {
+						-- Store all data in value
 						value = entry,
-
-						-- 🔥 search engine core (NO custom logic)
+						-- For searching and highlighting
 						ordinal = table.concat({
-							entry.type or "",
 							entry.time or "",
+							entry.type or "",
 							entry.text or "",
 						}, " "),
-
-						-- Add display_name for better preview handling
-						display_name = entry.time .. " [" .. (entry.type or "") .. "] " .. preview,
-
-						-- =========================
-						-- UI rendering only
-						-- =========================
-						display = function()
-							return displayer({
-								entry.time or "",
-								entry.type or "",
-								preview,
-							})
-						end,
+						-- For display with highlight support
+						display = displayer({
+							{ entry.time or "", "TelescopeResultsIdentifier" },
+							{ entry.type or "", "TelescopeResultsIdentifier" },
+							{ preview, "TelescopeResultsIdentifier" },
+						}),
+						-- Make sure the entry has all necessary fields for preview
+						filename = vim.fn.tempname() .. (entry.type and "." .. entry.type or ".txt"),
+						cwd = vim.loop.cwd(),
 					}
 				end,
 			}),
 
 			-- =========================
-			-- fuzzy sorter (Telescope default engine) with highlights
+			-- Use generic sorter for proper keyword highlighting
 			-- =========================
 			sorter = conf.generic_sorter({}),
 
 			-- =========================
-			-- Custom previewer that shows the full content
+			-- Custom previewer that also highlights search terms
 			-- =========================
-			previewer = (function()
-				local builtin_previewer = require("telescope.previewers").builtin
-				return builtin_previewer.new({
-					title = "Full Content",
-					-- Define how to show the preview
-					define_preview = function(self, entry, status)
-						if not entry or not entry.value then
-							vim.api.nvim_buf_set_lines(self.state.bufnr, 0, -1, false, { "" })
-							return
-						end
+			previewer = require("telescope.previewers").new_buffer_previewer({
+				title = "Knowledge Content",
+				define_preview = function(self, entry, status)
+					if not self.state.bufnr then
+						return
+					end
 
-						local content = entry.value.text or ""
-						local lines = vim.split(content, "\n")
+					-- Safety check for entry and its value
+					local content = "No content available"
+					if entry and entry.value and entry.value.text then
+						content = entry.value.text
+					elseif entry and entry.value then
+						-- If text is missing but we have other data, show it
+						content = vim.inspect(entry.value)
+					end
 
-						vim.api.nvim_buf_set_lines(self.state.bufnr, 0, -1, false, lines)
-						vim.api.nvim_buf_set_option(self.state.bufnr, "filetype", "markdown") -- Set appropriate filetype
-						vim.api.nvim_buf_set_option(self.state.bufnr, "buftype", "nofile")
-					end,
-				})
-			end)(),
+					local lines = vim.split(content, "\n")
+					vim.api.nvim_buf_set_lines(self.state.bufnr, 0, -1, false, lines)
+					vim.api.nvim_buf_set_option(self.state.bufnr, "filetype", "markdown")
+					vim.api.nvim_buf_set_option(self.state.bufnr, "buftype", "nofile")
+					vim.api.nvim_buf_set_option(self.state.bufnr, "bufhidden", "hide")
+
+					-- Highlight search matches in preview buffer
+					if status and status.prompt and status.prompt ~= "" then
+						local query = status.prompt
+						-- Clear existing matches
+						vim.fn.matchdelete(1, self.state.bufnr)
+						-- Add new match for search term
+						vim.fn.matchadd("Search", query, 10, 1, { bufnr = self.state.bufnr })
+					end
+				end,
+			}),
 
 			-- =========================
 			-- actions
