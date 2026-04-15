@@ -161,7 +161,7 @@ end
 -- keymap
 -- =========================
 function M.setup()
-	vim.keymap.set("n", "<leader>ih", M.open, {
+	vim.keymap.set("n", "<leader>ik", M.open, {
 		desc = "Open knowledge base (Telescope)",
 	})
 end
