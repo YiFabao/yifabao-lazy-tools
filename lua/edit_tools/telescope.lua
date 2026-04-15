@@ -70,7 +70,8 @@ function M.open()
 			prompt_title = "Knowledge Base",
 
 			-- =========================
-			-- search source
+			-- search source (IMPORTANT)
+			-- Telescope handles fuzzy + highlight
 			-- =========================
 			finder = finders.new_table({
 				results = items,
@@ -85,18 +86,20 @@ function M.open()
 					return {
 						-- Store all data in value
 						value = entry,
-						-- For searching and highlighting
+						-- For searching
 						ordinal = table.concat({
 							entry.time or "",
 							entry.type or "",
 							entry.text or "",
 						}, " "),
-						-- For display with highlight support
-						display = displayer({
-							{ entry.time or "", "TelescopeResultsIdentifier" },
-							{ entry.type or "", "TelescopeResultsIdentifier" },
-							{ preview, "TelescopeResultsIdentifier" },
-						}),
+						-- For display
+						display = function()
+							return displayer({
+								entry.time or "",
+								entry.type or "",
+								preview,
+							})
+						end,
 						-- Make sure the entry has all necessary fields for preview
 						filename = vim.fn.tempname() .. (entry.type and "." .. entry.type or ".txt"),
 						cwd = vim.loop.cwd(),
@@ -105,12 +108,12 @@ function M.open()
 			}),
 
 			-- =========================
-			-- Use generic sorter for proper keyword highlighting
+			-- fuzzy sorter (Telescope default engine) with highlights
 			-- =========================
 			sorter = conf.generic_sorter({}),
 
 			-- =========================
-			-- Custom previewer that also highlights search terms
+			-- Disable default previewer and use a simple one
 			-- =========================
 			previewer = require("telescope.previewers").new_buffer_previewer({
 				title = "Knowledge Content",
@@ -133,15 +136,6 @@ function M.open()
 					vim.api.nvim_buf_set_option(self.state.bufnr, "filetype", "markdown")
 					vim.api.nvim_buf_set_option(self.state.bufnr, "buftype", "nofile")
 					vim.api.nvim_buf_set_option(self.state.bufnr, "bufhidden", "hide")
-
-					-- Highlight search matches in preview buffer
-					if status and status.prompt and status.prompt ~= "" then
-						local query = status.prompt
-						-- Clear existing matches
-						vim.fn.matchdelete(1, self.state.bufnr)
-						-- Add new match for search term
-						vim.fn.matchadd("Search", query, 10, 1, { bufnr = self.state.bufnr })
-					end
 				end,
 			}),
 
