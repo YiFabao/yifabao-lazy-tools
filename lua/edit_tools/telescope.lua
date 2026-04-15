@@ -88,7 +88,7 @@ function M.open()
 end
 
 function M.setup()
-	vim.keymap.set("n", "<leader>kh", M.open, {
+	vim.keymap.set("n", "<leader>ih", M.open, {
 		desc = "Open history (Telescope)",
 	})
 end
