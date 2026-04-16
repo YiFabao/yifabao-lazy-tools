@@ -185,7 +185,11 @@ end
 
 local function delete_entry(id)
 	ensure_db()
-	db:eval("DELETE FROM knowledge WHERE id = " .. tonumber(id))
+	id = tonumber(id)
+	if not id then
+		return
+	end
+	db:eval("DELETE FROM knowledge WHERE id = ?", { id })
 end
 
 local function list_recent(limit)
@@ -214,27 +218,27 @@ local function search_db(query, limit)
 
 	local tag, clean = parse_tag_query(query)
 	local conditions = {}
+	local params = {}
 
 	-- 1) FTS 子查询
 	if clean ~= "" then
 		table.insert(
 			conditions,
-			string.format(
-				[[
+			[[
       k.id IN (
         SELECT rowid
         FROM knowledge_fts
-        WHERE knowledge_fts MATCH '%s'
+        WHERE knowledge_fts MATCH ?
       )
-    ]],
-				escape_fts(clean)
-			)
+    ]]
 		)
+		table.insert(params, escape_fts(clean))
 	end
 
 	-- 2) tag 条件
 	if tag then
-		table.insert(conditions, string.format("k.tags LIKE '%%%s%%'", tag))
+		table.insert(conditions, "k.tags LIKE ?")
+		table.insert(params, "%" .. tag .. "%")
 	end
 
 	local where_sql = ""
@@ -248,14 +252,14 @@ local function search_db(query, limit)
     FROM knowledge k
     %s
     ORDER BY k.time DESC
-    LIMIT %d
+    LIMIT ?
   ]],
-		where_sql,
-		limit or 100
+		where_sql
 	)
+	table.insert(params, limit or 100)
 
 	local ok, rows = pcall(function()
-		return db:eval(sql)
+		return db:eval(sql, params)
 	end)
 
 	if not ok or type(rows) ~= "table" then
