@@ -555,10 +555,19 @@ function M.open()
 					local content_lines = vim.split(value.text or "", "\n")
 					vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, vim.list_extend(header, content_lines))
 
-					-- 关键：启用 Markdown 语法高亮
+					-- 关键：启用 Markdown 语法高亮(基础高亮)
 					vim.api.nvim_set_option_value("filetype", "markdown", { buf = bufnr })
+					vim.api.nvim_set_option_value("wrap", true, { buf = bufnr })
+
 					-- 可选：如果安装了 nvim-treesitter + markdown parser，可进一步增强
-					pcall(vim.treesitter.start, bufnr, "markdown")
+					-- 增强 Treesitter 高亮（兼容 Neovim 0.10+ / 0.11+）
+					pcall(function()
+						vim.treesitter.start(bufnr, "markdown")
+						local parser = vim.treesitter.get_parser(bufnr, "markdown")
+						if parser then
+							parser:parse(true) -- 强制解析整个 buffer
+						end
+					end)
 				end,
 			}),
 			attach_mappings = function(prompt_bufnr, map)
