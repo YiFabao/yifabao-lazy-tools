@@ -46,7 +46,7 @@ local function init_db()
 	db:eval([[
     CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_fts USING fts5(
       title, content, tags,
-      tokenize = 'trigram',
+      tokenize = 'unicode61 remove_diacritics 0',
       content = 'knowledge',
       content_rowid = 'id'
     );
@@ -133,7 +133,12 @@ local function escape_fts(query)
 	if query == "" then
 		return ""
 	end
-	return query
+	-- 对中文和英文都更友好：每个词后面加 *
+	local tokens = {}
+	for word in query:gmatch("%S+") do
+		table.insert(tokens, word .. "*")
+	end
+	return table.concat(tokens, " ")
 end
 
 local function parse_tag_query(query)
