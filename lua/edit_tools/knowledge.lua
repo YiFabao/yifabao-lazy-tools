@@ -111,9 +111,17 @@ local function rows_to_items(rows)
 end
 
 local function escape_fts(query)
-	query = query or ""
-	query = query:gsub("'", "''")
-	return query
+	query = vim.trim(query or "")
+	if query == "" then
+		return ""
+	end
+
+	local tokens = {}
+	for word in query:gmatch("%S+") do
+		table.insert(tokens, word .. "*")
+	end
+
+	return table.concat(tokens, " ")
 end
 
 local function parse_tag_query(query)
