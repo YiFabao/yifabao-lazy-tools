@@ -556,10 +556,9 @@ function M.open()
 					vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, vim.list_extend(header, content_lines))
 
 					-- 关键：启用 Markdown 语法高亮
-					-- vim.api.nvim_buf_set_option(bufnr, "filetype", "markdown") deprecated
 					vim.api.nvim_set_option_value("filetype", "markdown", { buf = bufnr })
 					-- 可选：如果安装了 nvim-treesitter + markdown parser，可进一步增强
-					-- pcall(vim.treesitter.start, bufnr, "markdown")
+					pcall(vim.treesitter.start, bufnr, "markdown")
 				end,
 			}),
 			attach_mappings = function(prompt_bufnr, map)
