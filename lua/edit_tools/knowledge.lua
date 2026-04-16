@@ -39,10 +39,12 @@ local function init_db()
   ]])
 
 	-- 切换 tokenizer 时必须重建
+	vim.notify("删除 table knowledge_fts")
 	db:eval([[
     DROP TABLE IF EXISTS knowledge_fts;
   ]])
 
+	vim.notify("创建 table knowledge_fts")
 	db:eval([[
     CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_fts USING fts5(
       title, content, tags,
