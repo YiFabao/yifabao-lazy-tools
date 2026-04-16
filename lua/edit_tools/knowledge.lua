@@ -37,8 +37,11 @@ local function init_db()
     );
   ]])
 
+	-- 使用事务保护
+	db:exec("BEGIN TRANSACTION;")
+
 	-- 切换为 trigram tokenizer（支持中文子串搜索）
-	db:eval("DROP TABLE IF EXISTS knowledge_fts;")
+	-- db:eval("DROP TABLE IF EXISTS knowledge_fts;")
 
 	db:eval([[
     CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_fts USING fts5(
@@ -74,11 +77,17 @@ local function init_db()
   ]])
 
 	-- 自动重建 FTS 索引（首次切换 tokenizer 时重要）
-	db:eval([[
-    INSERT INTO knowledge_fts(rowid, title, content, tags)
-    SELECT id, title, content, tags FROM knowledge
-    WHERE id NOT IN (SELECT rowid FROM knowledge_fts);
-  ]])
+	-- db:eval([[
+	--    INSERT INTO knowledge_fts(rowid, title, content, tags)
+	--    SELECT id, title, content, tags FROM knowledge
+	--    WHERE id NOT IN (SELECT rowid FROM knowledge_fts);
+	--  ]])
+	-- 因为是新数据库，暂时没有数据，不需要重建索引
+	-- 等你保存几条数据后，触发器会自动同步
+
+	db:exec("COMMIT;")
+
+	vim.notify("知识库数据库已重新创建（trigram FTS 已启用）", vim.log.levels.INFO)
 end
 
 local function ensure_db()
