@@ -18,9 +18,11 @@ end
 local function init_db()
 	ensure_dir()
 
-	db = sqlite({
-		uri = db_path(),
-	})
+	if db and db.isopen and db:isopen() then
+		return
+	end
+
+	db = sqlite({ uri = db_path() })
 
 	db:open()
 
@@ -36,10 +38,15 @@ local function init_db()
     );
   ]])
 
+	-- 切换 tokenizer 时必须重建
+	db:eval([[
+    DROP TABLE IF EXISTS knowledge_fts;
+  ]])
+
 	db:eval([[
     CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_fts USING fts5(
       title, content, tags,
-      prefix='2 3 4',
+      tokenize =  'trigram',
       content='knowledge',
       content_rowid='id'
     );
@@ -66,6 +73,13 @@ local function init_db()
       INSERT INTO knowledge_fts(rowid, title, content, tags)
       VALUES (new.id, new.title, new.content, new.tags);
     END;
+  ]])
+
+	-- 自动重建 FTS 索引（切换 tokenizer 后只需首次加载时执行一次，速度极快）
+	db:eval([[
+    INSERT INTO knowledge_fts(rowid, title, content, tags)
+    SELECT id, title, content, tags FROM knowledge
+    WHERE id NOT IN (SELECT rowid FROM knowledge_fts);
   ]])
 end
 
@@ -115,13 +129,9 @@ local function escape_fts(query)
 	if query == "" then
 		return ""
 	end
-
-	local tokens = {}
-	for word in query:gmatch("%S+") do
-		table.insert(tokens, word .. "*")
-	end
-
-	return table.concat(tokens, " ")
+	-- trigram 天然支持子串 + 多词 AND 搜索，无需 split + *
+	-- 如果你想强制 phrase search，可以改成 '"' .. query .. '"'
+	return query
 end
 
 local function parse_tag_query(query)
@@ -142,6 +152,12 @@ local function detect_type(text)
 	end
 	if text:match("function%s") or text:match("class%s") then
 		return "code"
+	end
+	if text:match("^https?://") then
+		return "url"
+	end
+	if text:match("^%s*[%-%*]") or text:match("^#") then
+		return "markdown"
 	end
 	return "text"
 end
@@ -198,6 +214,7 @@ local function delete_entry(id)
 		return
 	end
 	db:eval("DELETE FROM knowledge WHERE id = ?", { id })
+	vim.notify("已删除 #" .. id)
 end
 
 local function list_recent(limit)
@@ -347,6 +364,131 @@ function M.open_paste_window()
 end
 
 -- =========================
+-- Edit entry
+-- =========================
+function M.edit(id)
+	id = tonumber(id)
+	if not id then
+		vim.notify("无效的 ID", vim.log.levels.ERROR)
+		return
+	end
+
+	ensure_db()
+
+	-- 查询当前记录
+	local rows = db:eval("SELECT id, title, tags, content FROM knowledge WHERE id = ?", { id })
+	if not rows or #rows == 0 then
+		vim.notify("未找到该记录 #" .. id, vim.log.levels.ERROR)
+		return
+	end
+
+	local entry = rows[1]
+
+	-- 创建浮动编辑窗口
+	local buf = vim.api.nvim_create_buf(false, true)
+	local width = math.floor(vim.o.columns * 0.8)
+	local height = math.floor(vim.o.lines * 0.85)
+
+	local win = vim.api.nvim_open_win(buf, true, {
+		relative = "editor",
+		width = width,
+		height = height,
+		row = math.floor((vim.o.lines - height) / 2),
+		col = math.floor((vim.o.columns - width) / 2),
+		border = "rounded",
+		style = "minimal",
+		title = " 编辑知识 #" .. id,
+		title_pos = "center",
+	})
+
+	-- 准备编辑内容（带分隔线，便于区分字段）
+	local edit_lines = {
+		"=== Title ===",
+		entry.title or "",
+		"",
+		"=== Tags (用逗号分隔) ===",
+		entry.tags or "",
+		"",
+		"=== Content (支持 Markdown) ===",
+	}
+	vim.list_extend(edit_lines, vim.split(entry.content or "", "\n"))
+
+	vim.api.nvim_buf_set_lines(buf, 0, -1, false, edit_lines)
+
+	-- 设置 buffer 选项
+	vim.api.nvim_set_option_value("filetype", "markdown", { buf = buf })
+	vim.api.nvim_set_option_value("wrap", true, { buf = buf })
+	vim.api.nvim_set_option_value("linebreak", true, { buf = buf })
+	vim.api.nvim_set_option_value("modifiable", true, { buf = buf })
+
+	-- 保存快捷键 <C-s>
+	vim.keymap.set("n", "<C-s>", function()
+		local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+
+		local title = ""
+		local tags = ""
+		local content_start = 1
+		local in_content = false
+
+		for i, line in ipairs(lines) do
+			if line == "=== Title ===" then
+				title = lines[i + 1] or ""
+			elseif line == "=== Tags (用逗号分隔) ===" then
+				tags = lines[i + 1] or ""
+			elseif line == "=== Content (支持 Markdown) ===" then
+				content_start = i + 1
+				in_content = true
+				break
+			end
+		end
+
+		local content = table.concat(vim.list_slice(lines, content_start), "\n")
+
+		-- 更新数据库
+		db:eval(
+			[[
+      UPDATE knowledge 
+      SET title = ?, 
+          tags = ?, 
+          content = ?,
+          time = ?
+      WHERE id = ?
+    ]],
+			{
+				vim.trim(title),
+				vim.trim(tags),
+				content,
+				os.date("%Y-%m-%d %H:%M:%S"),
+				id,
+			}
+		)
+
+		vim.notify("知识 #" .. id .. " 已更新", vim.log.levels.INFO)
+
+		-- 关闭窗口
+		vim.api.nvim_win_close(win, true)
+		vim.api.nvim_buf_delete(buf, { force = true })
+
+		-- 刷新 Telescope（如果当前正在打开）
+		vim.schedule(function()
+			if M.open then
+				-- 简单方式：重新打开 Telescope
+				M.open()
+			end
+		end)
+	end, { buffer = buf, desc = "保存编辑" })
+
+	-- 退出快捷键 q
+	vim.keymap.set("n", "q", function()
+		vim.api.nvim_win_close(win, true)
+		vim.api.nvim_buf_delete(buf, { force = true })
+	end, { buffer = buf, desc = "关闭编辑窗口" })
+
+	-- 光标定位到 Title 行
+	vim.api.nvim_win_set_cursor(win, { 2, 0 })
+end
+
+-- =========================
 -- telescope
 -- =========================
 function M.open()
@@ -386,9 +528,36 @@ function M.open()
 				end,
 			}),
 			sorter = conf.generic_sorter({}),
+			-- previewer = previewers.new_buffer_previewer({
+			-- 	define_preview = function(self, entry)
+			-- 		vim.api.nvim_buf_set_lines(self.state.bufnr, 0, -1, false, vim.split(entry.value.text, "\n"))
+			-- 	end,
+			-- }),
 			previewer = previewers.new_buffer_previewer({
 				define_preview = function(self, entry)
-					vim.api.nvim_buf_set_lines(self.state.bufnr, 0, -1, false, vim.split(entry.value.text, "\n"))
+					local bufnr = self.state.bufnr
+					local value = entry.value
+
+					-- 构建带元数据的预览
+					local header = {
+						"=== Knowledge Preview ===",
+						"Time : " .. (value.time or ""),
+						"Type : " .. (value.type or ""),
+						"Tags : " .. table.concat(value.tags, ", "),
+						"Title: " .. (value.title or ""),
+						"ID   : " .. (value.id or ""),
+						"",
+						"──────────────────────────────",
+						"",
+					}
+					local content_lines = vim.split(value.text or "", "\n")
+					vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, vim.list_extend(header, content_lines))
+
+					-- 关键：启用 Markdown 语法高亮
+					-- vim.api.nvim_buf_set_option(bufnr, "filetype", "markdown") deprecated
+					vim.api.nvim_set_option_value("filetype", "markdown", { buf = bufnr })
+					-- 可选：如果安装了 nvim-treesitter + markdown parser，可进一步增强
+					-- pcall(vim.treesitter.start, bufnr, "markdown")
 				end,
 			}),
 			attach_mappings = function(prompt_bufnr, map)
@@ -405,10 +574,28 @@ function M.open()
 					vim.schedule(M.open)
 				end
 
+				local function edit_current()
+					local selection = action_state.get_selected_entry()
+					if not selection then
+						return
+					end
+					actions.close(prompt_bufnr)
+					-- 异步打开编辑窗口，避免 telescope 关闭冲突
+					vim.schedule(function()
+						M.edit(selection.value.id)
+					end)
+				end
+
 				map("i", "<CR>", insert_entry)
 				map("n", "<CR>", insert_entry)
 				map("i", "dd", delete_current)
 				map("n", "dd", delete_current)
+
+				-- 新增：编辑快捷键（推荐用 "ee" 或 "<C-e>"）
+				map("i", "<C-e>", edit_current)
+				map("n", "<C-e>", edit_current)
+				map("i", "ee", edit_current) -- 普通模式也可以用 ee
+				map("n", "ee", edit_current)
 
 				return true
 			end,
