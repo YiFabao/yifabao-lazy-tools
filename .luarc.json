@@ -1,0 +1,10 @@
+{
+  "Lua.diagnostics.globals": [
+    "vim"
+  ],
+  "Lua.diagnostics.disable": [
+    "lowercase-global",
+    "undefined-field",
+    "need-check-nil"
+  ]
+}

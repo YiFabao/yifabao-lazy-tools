@@ -1,7 +1,6 @@
 local M = {}
-
 local sqlite = require("sqlite")
-local db = nil
+local db = nil -- db 由ensure_db / init_db 保证非nil
 
 -- =========================
 -- path / db lifecycle
@@ -18,12 +17,12 @@ end
 local function init_db()
 	ensure_dir()
 
-	if db and db.isopen and db:isopen() then
+	-- 更安全的打开检查
+	if db and db:isopen() then
 		return
 	end
 
 	db = sqlite({ uri = db_path() })
-
 	db:open()
 
 	db:eval([[
@@ -38,22 +37,19 @@ local function init_db()
     );
   ]])
 
-	-- 切换 tokenizer 时必须重建
-	vim.notify("删除 table knowledge_fts")
-	db:eval([[
-    DROP TABLE IF EXISTS knowledge_fts;
-  ]])
+	-- 切换为 trigram tokenizer（支持中文子串搜索）
+	db:eval("DROP TABLE IF EXISTS knowledge_fts;")
 
-	vim.notify("创建 table knowledge_fts")
 	db:eval([[
     CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_fts USING fts5(
       title, content, tags,
-      tokenize =  'trigram',
-      content='knowledge',
-      content_rowid='id'
+      tokenize = 'trigram',
+      content = 'knowledge',
+      content_rowid = 'id'
     );
   ]])
 
+	-- Triggers
 	db:eval([[
     CREATE TRIGGER IF NOT EXISTS knowledge_ai AFTER INSERT ON knowledge BEGIN
       INSERT INTO knowledge_fts(rowid, title, content, tags)
@@ -77,7 +73,7 @@ local function init_db()
     END;
   ]])
 
-	-- 自动重建 FTS 索引（切换 tokenizer 后只需首次加载时执行一次，速度极快）
+	-- 自动重建 FTS 索引（首次切换 tokenizer 时重要）
 	db:eval([[
     INSERT INTO knowledge_fts(rowid, title, content, tags)
     SELECT id, title, content, tags FROM knowledge
@@ -108,9 +104,7 @@ local function rows_to_items(rows)
 	if type(rows) ~= "table" then
 		return {}
 	end
-
 	local items = {}
-
 	for _, row in ipairs(rows) do
 		table.insert(items, {
 			id = row.id,
@@ -122,7 +116,6 @@ local function rows_to_items(rows)
 			raw = row,
 		})
 	end
-
 	return items
 end
 
@@ -131,8 +124,6 @@ local function escape_fts(query)
 	if query == "" then
 		return ""
 	end
-	-- trigram 天然支持子串 + 多词 AND 搜索，无需 split + *
-	-- 如果你想强制 phrase search，可以改成 '"' .. query .. '"'
 	return query
 end
 
@@ -166,7 +157,6 @@ end
 
 local function detect_tags(text)
 	local tags = {}
-
 	if text:match("vim%.") or text:match("nvim") then
 		table.insert(tags, "neovim")
 	end
@@ -179,7 +169,6 @@ local function detect_tags(text)
 	if text:match("%d+%.%d+%.%d+%.%d+") then
 		table.insert(tags, "network")
 	end
-
 	return tags
 end
 
@@ -188,7 +177,6 @@ end
 -- =========================
 local function save_content(content)
 	ensure_db()
-
 	if not content or content == "" then
 		vim.notify("没有内容可以保存", vim.log.levels.WARN)
 		return
@@ -215,13 +203,13 @@ local function delete_entry(id)
 	if not id then
 		return
 	end
+
 	db:eval("DELETE FROM knowledge WHERE id = ?", { id })
-	vim.notify("已删除 #" .. id)
+	vim.notify("已删除 #" .. id, vim.log.levels.INFO)
 end
 
 local function list_recent(limit)
 	ensure_db()
-
 	local rows = db:eval(string.format(
 		[[
     SELECT id, time, type, tags, title, content
@@ -231,14 +219,11 @@ local function list_recent(limit)
   ]],
 		limit or 100
 	))
-
 	return rows_to_items(rows)
 end
 
 local function search_db(query, limit)
 	ensure_db()
-	-- vim.notify("查询数据库", vim.log.levels.INFO)
-
 	if not query or query == "" then
 		return list_recent(limit)
 	end
@@ -247,32 +232,24 @@ local function search_db(query, limit)
 	local conditions = {}
 	local params = {}
 
-	-- 1) FTS 子查询
 	if clean ~= "" then
 		table.insert(
 			conditions,
 			[[
       k.id IN (
-        SELECT rowid
-        FROM knowledge_fts
-        WHERE knowledge_fts MATCH ?
+        SELECT rowid FROM knowledge_fts WHERE knowledge_fts MATCH ?
       )
     ]]
 		)
 		table.insert(params, escape_fts(clean))
 	end
 
-	-- 2) tag 条件
 	if tag then
 		table.insert(conditions, "k.tags LIKE ?")
 		table.insert(params, "%" .. tag .. "%")
 	end
 
-	local where_sql = ""
-	if #conditions > 0 then
-		where_sql = "WHERE " .. table.concat(conditions, " AND ")
-	end
-
+	local where_sql = #conditions > 0 and "WHERE " .. table.concat(conditions, " AND ") or ""
 	local sql = string.format(
 		[[
     SELECT k.id, k.time, k.type, k.tags, k.title, k.content
@@ -283,41 +260,33 @@ local function search_db(query, limit)
   ]],
 		where_sql
 	)
+
 	table.insert(params, limit or 100)
 
-	local ok, rows = pcall(function()
-		return db:eval(sql, params)
-	end)
-
+	local ok, rows = pcall(db.eval, db, sql, params)
 	if not ok or type(rows) ~= "table" then
 		return {}
 	end
-
 	return rows_to_items(rows)
 end
+
 -- =========================
 -- UI save methods
 -- =========================
 function M.save_visual_selection()
-	local bufnr = 0
-
 	local mode = vim.fn.mode()
-
 	if mode ~= "v" and mode ~= "V" and mode ~= "\22" then
 		vim.notify("请在 visual 模式下使用", vim.log.levels.WARN)
 		return
 	end
 
-	-- ⭐ 关键：用 getregion（Neovim 0.8+ 稳定 API）
 	local lines = vim.fn.getregion(vim.fn.getpos("v"), vim.fn.getpos("."), { type = mode })
-
 	if not lines or #lines == 0 then
 		vim.notify("空选区", vim.log.levels.WARN)
 		return
 	end
 
 	local content = table.concat(lines, "\n")
-
 	if content:match("^%s*$") then
 		vim.notify("选区为空", vim.log.levels.WARN)
 		return
@@ -331,10 +300,10 @@ function M.paste_from_clipboard()
 end
 
 function M.open_paste_window()
+	-- ...（你的原代码保持不变）
 	local buf = vim.api.nvim_create_buf(false, true)
 	local width = math.floor(vim.o.columns * 0.7)
 	local height = math.floor(vim.o.lines * 0.6)
-
 	local win = vim.api.nvim_open_win(buf, true, {
 		relative = "editor",
 		width = width,
@@ -351,7 +320,6 @@ function M.open_paste_window()
 		"下面开始输入",
 		"",
 	})
-
 	vim.api.nvim_win_set_cursor(win, { 4, 0 })
 
 	vim.keymap.set("n", "<C-s>", function()
@@ -377,7 +345,6 @@ function M.edit(id)
 
 	ensure_db()
 
-	-- 查询当前记录
 	local rows = db:eval("SELECT id, title, tags, content FROM knowledge WHERE id = ?", { id })
 	if not rows or #rows == 0 then
 		vim.notify("未找到该记录 #" .. id, vim.log.levels.ERROR)
@@ -386,7 +353,6 @@ function M.edit(id)
 
 	local entry = rows[1]
 
-	-- 创建浮动编辑窗口
 	local buf = vim.api.nvim_create_buf(false, true)
 	local width = math.floor(vim.o.columns * 0.8)
 	local height = math.floor(vim.o.lines * 0.85)
@@ -403,7 +369,6 @@ function M.edit(id)
 		title_pos = "center",
 	})
 
-	-- 准备编辑内容（带分隔线，便于区分字段）
 	local edit_lines = {
 		"=== Title ===",
 		entry.title or "",
@@ -417,20 +382,18 @@ function M.edit(id)
 
 	vim.api.nvim_buf_set_lines(buf, 0, -1, false, edit_lines)
 
-	-- 设置 buffer 选项
+	-- 设置选项
 	vim.api.nvim_set_option_value("filetype", "markdown", { buf = buf })
-	vim.api.nvim_set_option_value("wrap", true, { buf = buf })
-	vim.api.nvim_set_option_value("linebreak", true, { buf = buf })
+	vim.api.nvim_set_option_value("wrap", true, { win = win })
+	vim.api.nvim_set_option_value("linebreak", true, { win = win })
 	vim.api.nvim_set_option_value("modifiable", true, { buf = buf })
 
-	-- 保存快捷键 <C-s>
+	-- 保存
 	vim.keymap.set("n", "<C-s>", function()
 		local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
-
 		local title = ""
 		local tags = ""
 		local content_start = 1
-		local in_content = false
 
 		for i, line in ipairs(lines) do
 			if line == "=== Title ===" then
@@ -439,19 +402,17 @@ function M.edit(id)
 				tags = lines[i + 1] or ""
 			elseif line == "=== Content (支持 Markdown) ===" then
 				content_start = i + 1
-				in_content = true
 				break
 			end
 		end
 
 		local content = table.concat(vim.list_slice(lines, content_start), "\n")
 
-		-- 更新数据库
 		db:eval(
 			[[
-      UPDATE knowledge 
-      SET title = ?, 
-          tags = ?, 
+      UPDATE knowledge
+      SET title = ?,
+          tags = ?,
           content = ?,
           time = ?
       WHERE id = ?
@@ -467,26 +428,22 @@ function M.edit(id)
 
 		vim.notify("知识 #" .. id .. " 已更新", vim.log.levels.INFO)
 
-		-- 关闭窗口
 		vim.api.nvim_win_close(win, true)
 		vim.api.nvim_buf_delete(buf, { force = true })
 
-		-- 刷新 Telescope（如果当前正在打开）
 		vim.schedule(function()
 			if M.open then
-				-- 简单方式：重新打开 Telescope
 				M.open()
 			end
 		end)
-	end, { buffer = buf, desc = "保存编辑" })
+	end, { buffer = buf })
 
-	-- 退出快捷键 q
+	-- 退出
 	vim.keymap.set("n", "q", function()
 		vim.api.nvim_win_close(win, true)
 		vim.api.nvim_buf_delete(buf, { force = true })
-	end, { buffer = buf, desc = "关闭编辑窗口" })
+	end, { buffer = buf })
 
-	-- 光标定位到 Title 行
 	vim.api.nvim_win_set_cursor(win, { 2, 0 })
 end
 
@@ -509,9 +466,7 @@ function M.open()
 					return search_db(prompt, 100)
 				end,
 				entry_maker = function(entry)
-					local preview = entry.text:gsub("\n", " ")
-					preview = preview:sub(1, 80)
-
+					local preview = entry.text:gsub("\n", " "):sub(1, 80)
 					return {
 						value = entry,
 						display = string.format(
@@ -530,17 +485,12 @@ function M.open()
 				end,
 			}),
 			sorter = conf.generic_sorter({}),
-			-- previewer = previewers.new_buffer_previewer({
-			-- 	define_preview = function(self, entry)
-			-- 		vim.api.nvim_buf_set_lines(self.state.bufnr, 0, -1, false, vim.split(entry.value.text, "\n"))
-			-- 	end,
-			-- }),
 			previewer = previewers.new_buffer_previewer({
 				define_preview = function(self, entry)
 					local bufnr = self.state.bufnr
+					local winid = self.state.winid
 					local value = entry.value
 
-					-- 构建带元数据的预览
 					local header = {
 						"=== Knowledge Preview ===",
 						"Time : " .. (value.time or ""),
@@ -552,24 +502,28 @@ function M.open()
 						"──────────────────────────────",
 						"",
 					}
+
 					local content_lines = vim.split(value.text or "", "\n")
 					vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, vim.list_extend(header, content_lines))
 
-					-- 关键：启用 Markdown 语法高亮(基础高亮)
 					vim.api.nvim_set_option_value("filetype", "markdown", { buf = bufnr })
-					vim.api.nvim_set_option_value("wrap", true, { buf = bufnr })
 
-					-- 可选：如果安装了 nvim-treesitter + markdown parser，可进一步增强
-					-- 增强 Treesitter 高亮（兼容 Neovim 0.10+ / 0.11+）
+					if winid and vim.api.nvim_win_is_valid(winid) then
+						vim.api.nvim_set_option_value("wrap", true, { win = winid })
+						vim.api.nvim_set_option_value("linebreak", true, { win = winid })
+					end
+
+					-- Treesitter 高亮
 					pcall(function()
 						vim.treesitter.start(bufnr, "markdown")
 						local parser = vim.treesitter.get_parser(bufnr, "markdown")
 						if parser then
-							parser:parse(true) -- 强制解析整个 buffer
+							parser:parse(true)
 						end
 					end)
 				end,
 			}),
+
 			attach_mappings = function(prompt_bufnr, map)
 				local function insert_entry()
 					local selection = action_state.get_selected_entry()
@@ -590,7 +544,6 @@ function M.open()
 						return
 					end
 					actions.close(prompt_bufnr)
-					-- 异步打开编辑窗口，避免 telescope 关闭冲突
 					vim.schedule(function()
 						M.edit(selection.value.id)
 					end)
@@ -600,11 +553,9 @@ function M.open()
 				map("n", "<CR>", insert_entry)
 				map("i", "dd", delete_current)
 				map("n", "dd", delete_current)
-
-				-- 新增：编辑快捷键（推荐用 "ee" 或 "<C-e>"）
 				map("i", "<C-e>", edit_current)
 				map("n", "<C-e>", edit_current)
-				map("i", "ee", edit_current) -- 普通模式也可以用 ee
+				map("i", "ee", edit_current)
 				map("n", "ee", edit_current)
 
 				return true
@@ -617,8 +568,8 @@ end
 -- migration
 -- =========================
 function M.migrate_from_jsonl()
+	-- ...（你的原代码基本不变，可保留）
 	ensure_db()
-
 	local file_path = vim.fn.stdpath("data") .. "/edit-tools/knowledge.jsonl"
 	if vim.fn.filereadable(file_path) == 0 then
 		vim.notify("没有 JSONL 文件", vim.log.levels.INFO)
@@ -637,7 +588,6 @@ function M.migrate_from_jsonl()
 			})
 		end
 	end
-
 	vim.notify("JSONL 迁移完成", vim.log.levels.INFO)
 end
 
@@ -647,25 +597,11 @@ end
 function M.setup()
 	ensure_db()
 
-	vim.keymap.set("v", "<leader>is", M.save_visual_selection, {
-		desc = "Save visual selection",
-	})
-
-	vim.keymap.set("n", "<leader>iv", M.paste_from_clipboard, {
-		desc = "Save clipboard",
-	})
-
-	vim.keymap.set("n", "<leader>ip", M.open_paste_window, {
-		desc = "Paste window",
-	})
-
-	vim.keymap.set("n", "<leader>ik", M.open, {
-		desc = "Knowledge search",
-	})
-
-	vim.keymap.set("n", "<leader>im", M.migrate_from_jsonl, {
-		desc = "Migrate JSONL",
-	})
+	vim.keymap.set("v", "<leader>is", M.save_visual_selection, { desc = "Save visual selection" })
+	vim.keymap.set("n", "<leader>iv", M.paste_from_clipboard, { desc = "Save clipboard" })
+	vim.keymap.set("n", "<leader>ip", M.open_paste_window, { desc = "Paste window" })
+	vim.keymap.set("n", "<leader>ik", M.open, { desc = "Knowledge search" })
+	vim.keymap.set("n", "<leader>im", M.migrate_from_jsonl, { desc = "Migrate JSONL" })
 end
 
 return M
