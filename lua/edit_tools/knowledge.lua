@@ -185,15 +185,15 @@ local function save_content(content, opts)
 	opts = opts or {}
 	local lines = vim.split(content, "\n")
 	local text = table.concat(lines, "\n")
-	
+
 	-- Use provided title/tags or auto-detect
 	local title = opts.title
 	local tags = opts.tags
-	
+
 	if not title then
 		title = lines[1] and lines[1]:sub(1, 80) or "Pasted Content"
 	end
-	
+
 	if not tags then
 		tags = detect_tags(text)
 		if type(tags) == "string" then
@@ -562,7 +562,11 @@ function M.open_paste_window()
 			elseif line == "=== Content ===" then
 				-- 找到分隔线后的内容
 				for j = i + 1, #lines do
-					if lines[j]:match("^%s*────────────────────────────────") then
+					if
+						lines[j]:match(
+							"^%s*────────────────────────────────"
+						)
+					then
 						content_start = j + 1
 						break
 					end
