@@ -640,6 +640,8 @@ function M.edit(id)
 		style = "minimal",
 		title = " 编辑知识 #" .. id,
 		title_pos = "center",
+		footer = " <C-s> 保存     q 返回列表 ",
+		footer_pos = "center",
 	})
 
 	local edit_lines = {
@@ -711,10 +713,15 @@ function M.edit(id)
 		end)
 	end, { buffer = buf })
 
-	-- 退出
+	-- 退出并返回列表
 	vim.keymap.set("n", "q", function()
 		vim.api.nvim_win_close(win, true)
 		vim.api.nvim_buf_delete(buf, { force = true })
+		vim.schedule(function()
+			if M.open then
+				M.open()
+			end
+		end)
 	end, { buffer = buf })
 
 	vim.api.nvim_win_set_cursor(win, { 2, 0 })
