@@ -393,8 +393,9 @@ function M.open_paste_window()
 
 		save_content(content)
 
-		vim.api.nvim_win_close(win, true)
-		vim.api.nvim_buf_delete(buf, { force = true })
+		vim.notify("已保存（未关闭窗口，可继续编辑）", vim.log.levels.INFO)
+		-- vim.api.nvim_win_close(win, true)
+		-- vim.api.nvim_buf_delete(buf, { force = true })
 	end, { buffer = buf })
 
 	-- ====================== 退出 ======================
