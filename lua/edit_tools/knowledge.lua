@@ -219,8 +219,28 @@ local function delete_entry(id)
 		return
 	end
 
-	db:eval("DELETE FROM knowledge WHERE id = ?", { id })
-	vim.notify("已删除 #" .. id, vim.log.levels.INFO)
+	-- 获取条目信息用于确认提示
+	local rows = db:eval("SELECT title, content FROM knowledge WHERE id = ?", { id })
+	if not rows or #rows == 0 then
+		vim.notify("未找到该记录 #" .. id, vim.log.levels.ERROR)
+		return
+	end
+
+	local entry = rows[1]
+	local preview = vim.trim(entry.title or entry.content:sub(1, 60))
+
+	local confirm = vim.fn.confirm("确认删除知识 #" .. id .. " ?\n标题: " .. preview, "&Yes\n&No", 2)
+	if confirm == 1 then
+		db:eval("DELETE FROM knowledge WHERE id = ?", { id })
+		vim.notify("已删除 #" .. id, vim.log.levels.INFO)
+
+		-- 如果在 Telescope 中删除，刷新列表
+		if M.open then
+			vim.schedule(M.open)
+		end
+	else
+		vim.notify("已取消删除", vim.log.levels.INFO)
+	end
 end
 
 local function list_recent(limit)
