@@ -806,9 +806,11 @@ function M.open()
 
 				local function delete_current()
 					local selection = action_state.get_selected_entry()
-					delete_entry(selection.value.id)
+					local id = selection.value.id
 					actions.close(prompt_bufnr)
-					vim.schedule(M.open)
+					vim.schedule(function()
+						delete_entry(id)
+					end)
 				end
 
 				local function edit_current()
