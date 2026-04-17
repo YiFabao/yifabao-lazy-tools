@@ -322,37 +322,51 @@ function M.rebuild_fts()
 end
 
 function M.open_paste_window()
-	-- 创建一个普通 buffer（不是 scratch）
-	local buf = vim.api.nvim_create_buf(false, false)
-	vim.api.nvim_buf_set_name(buf, "Knowledge Paste Buffer")
+	local buf = vim.api.nvim_create_buf(false, true)
 
-	-- 打开在当前窗口下方分屏（更稳定，推荐）
-	vim.cmd("belowright split")
-	vim.api.nvim_win_set_buf(0, buf)
+	-- 窗口尺寸（更宽更高，视觉更好）
+	local width = math.floor(vim.o.columns * 0.82)
+	local height = math.floor(vim.o.lines * 0.78)
 
-	-- 设置窗口高度（可调整）
-	vim.api.nvim_win_set_height(0, math.floor(vim.o.lines * 0.7))
+	local win = vim.api.nvim_open_win(buf, true, {
+		relative = "editor",
+		width = width,
+		height = height,
+		row = math.floor((vim.o.lines - height) / 2),
+		col = math.floor((vim.o.columns - width) / 2),
+		border = "rounded", -- 圆角边框，更现代
+		style = "minimal",
+		title = " 粘贴并编辑知识 ",
+		title_pos = "center",
+		footer = " <C-s> 保存到知识库     q 退出 ",
+		footer_pos = "center",
+	})
 
-	-- 初始化提示
+	-- 干净且友好的初始内容
 	vim.api.nvim_buf_set_lines(buf, 0, -1, false, {
-		"=== 粘贴知识缓冲区 ===",
-		"请在这里直接粘贴内容（Ctrl+V），可以随意编辑",
-		"编辑完成后按 <C-s> 保存到知识库，按 q 退出",
 		"",
-		"────────────────────────────────────",
+		"请直接在这里粘贴内容（Ctrl + V），然后可以随意编辑：",
+		"",
+		"────────────────────────────────────────────────────────────",
 		"",
 	})
 
-	-- 设置选项
+	-- 美化设置
 	vim.api.nvim_set_option_value("filetype", "markdown", { buf = buf })
-	vim.api.nvim_set_option_value("wrap", true, { win = 0 })
+	vim.api.nvim_set_option_value("wrap", true, { win = win })
+	vim.api.nvim_set_option_value("linebreak", true, { win = win })
 	vim.api.nvim_set_option_value("modifiable", true, { buf = buf })
 
-	-- 光标移到内容区
-	vim.api.nvim_win_set_cursor(0, { 6, 0 })
-	vim.cmd("startinsert")
+	-- 可选：给窗口添加一点背景高亮（让它更显眼）
+	vim.api.nvim_set_option_value("winhighlight", "Normal:NormalFloat,FloatBorder:Special", { win = win })
 
-	-- 保存快捷键（关键：直接取整个 buffer）
+	-- 光标定位到可编辑区域
+	vim.api.nvim_win_set_cursor(win, { 5, 0 })
+	vim.schedule(function()
+		vim.cmd("startinsert")
+	end)
+
+	-- ====================== 保存 ======================
 	vim.keymap.set("n", "<C-s>", function()
 		local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
 
@@ -361,7 +375,7 @@ function M.open_paste_window()
 		for i, line in ipairs(lines) do
 			if
 				line:match(
-					"^%s*────────────────────────────────────%s*$"
+					"^%s*────────────────────────────────"
 				)
 			then
 				start_idx = i + 1
@@ -378,18 +392,19 @@ function M.open_paste_window()
 		end
 
 		save_content(content)
-		vim.notify("已保存到知识库", vim.log.levels.INFO)
 
-		-- 关闭分屏
-		vim.cmd("close")
+		vim.api.nvim_win_close(win, true)
 		vim.api.nvim_buf_delete(buf, { force = true })
-	end, { buffer = buf, silent = true })
+	end, { buffer = buf })
 
-	-- 退出
+	-- ====================== 退出 ======================
 	vim.keymap.set("n", "q", function()
-		vim.cmd("close")
+		vim.api.nvim_win_close(win, true)
 		vim.api.nvim_buf_delete(buf, { force = true })
-	end, { buffer = buf, silent = true })
+	end, { buffer = buf })
+
+	-- 支持 visual 模式下保存
+	vim.keymap.set("v", "<C-s>", "<Esc><C-s>", { buffer = buf, remap = true })
 end
 
 -- =========================
