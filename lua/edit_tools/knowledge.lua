@@ -322,37 +322,74 @@ function M.rebuild_fts()
 end
 
 function M.open_paste_window()
-	-- ...（你的原代码保持不变）
-	local buf = vim.api.nvim_create_buf(false, true)
-	local width = math.floor(vim.o.columns * 0.7)
-	local height = math.floor(vim.o.lines * 0.6)
-	local win = vim.api.nvim_open_win(buf, true, {
-		relative = "editor",
-		width = width,
-		height = height,
-		row = math.floor((vim.o.lines - height) / 2),
-		col = math.floor((vim.o.columns - width) / 2),
-		border = "rounded",
-		style = "minimal",
-	})
+	-- 创建一个普通 buffer（不是 scratch）
+	local buf = vim.api.nvim_create_buf(false, false)
+	vim.api.nvim_buf_set_name(buf, "Knowledge Paste Buffer")
 
+	-- 打开在当前窗口下方分屏（更稳定，推荐）
+	vim.cmd("belowright split")
+	vim.api.nvim_win_set_buf(0, buf)
+
+	-- 设置窗口高度（可调整）
+	vim.api.nvim_win_set_height(0, math.floor(vim.o.lines * 0.7))
+
+	-- 初始化提示
 	vim.api.nvim_buf_set_lines(buf, 0, -1, false, {
-		"=== 粘贴知识窗口 ===",
+		"=== 粘贴知识缓冲区 ===",
+		"请在这里直接粘贴内容（Ctrl+V），可以随意编辑",
+		"编辑完成后按 <C-s> 保存到知识库，按 q 退出",
 		"",
-		"下面开始输入",
+		"────────────────────────────────────",
 		"",
 	})
-	vim.api.nvim_win_set_cursor(win, { 4, 0 })
 
+	-- 设置选项
+	vim.api.nvim_set_option_value("filetype", "markdown", { buf = buf })
+	vim.api.nvim_set_option_value("wrap", true, { win = 0 })
+	vim.api.nvim_set_option_value("modifiable", true, { buf = buf })
+
+	-- 光标移到内容区
+	vim.api.nvim_win_set_cursor(0, { 6, 0 })
+	vim.cmd("startinsert")
+
+	-- 保存快捷键（关键：直接取整个 buffer）
 	vim.keymap.set("n", "<C-s>", function()
-		local lines = vim.api.nvim_buf_get_lines(buf, 3, -1, false)
-		save_content(table.concat(lines, "\n"))
-		vim.api.nvim_buf_delete(buf, { force = true })
-	end, { buffer = buf })
+		local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
 
-	vim.keymap.set("n", "q", function()
+		-- 跳过提示行
+		local start_idx = 1
+		for i, line in ipairs(lines) do
+			if
+				line:match(
+					"^%s*────────────────────────────────────%s*$"
+				)
+			then
+				start_idx = i + 1
+				break
+			end
+		end
+
+		local content = table.concat(vim.list_slice(lines, start_idx), "\n")
+		content = vim.trim(content)
+
+		if content == "" then
+			vim.notify("内容为空，未保存", vim.log.levels.WARN)
+			return
+		end
+
+		save_content(content)
+		vim.notify("已保存到知识库", vim.log.levels.INFO)
+
+		-- 关闭分屏
+		vim.cmd("close")
 		vim.api.nvim_buf_delete(buf, { force = true })
-	end, { buffer = buf })
+	end, { buffer = buf, silent = true })
+
+	-- 退出
+	vim.keymap.set("n", "q", function()
+		vim.cmd("close")
+		vim.api.nvim_buf_delete(buf, { force = true })
+	end, { buffer = buf, silent = true })
 end
 
 -- =========================
