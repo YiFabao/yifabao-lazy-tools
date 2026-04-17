@@ -175,22 +175,37 @@ end
 -- =========================
 -- CRUD
 -- =========================
-local function save_content(content)
+local function save_content(content, opts)
 	ensure_db()
 	if not content or content == "" then
 		vim.notify("没有内容可以保存", vim.log.levels.WARN)
 		return
 	end
 
+	opts = opts or {}
 	local lines = vim.split(content, "\n")
 	local text = table.concat(lines, "\n")
-	local tags = detect_tags(text)
+	
+	-- Use provided title/tags or auto-detect
+	local title = opts.title
+	local tags = opts.tags
+	
+	if not title then
+		title = lines[1] and lines[1]:sub(1, 80) or "Pasted Content"
+	end
+	
+	if not tags then
+		tags = detect_tags(text)
+		if type(tags) == "string" then
+			tags = split_tags(tags)
+		end
+	end
 
 	db:insert("knowledge", {
 		time = os.date("%Y-%m-%d %H:%M:%S"),
 		type = detect_type(text),
 		tags = table.concat(tags, ","),
-		title = lines[1] and lines[1]:sub(1, 80) or "Pasted Content",
+		title = title,
 		content = text,
 	})
 
@@ -292,11 +307,149 @@ function M.save_visual_selection()
 		return
 	end
 
-	save_content(content)
+	-- 创建输入窗口
+	local buf = vim.api.nvim_create_buf(false, true)
+	local width = math.floor(vim.o.columns * 0.6)
+	local height = 10
+
+	local win = vim.api.nvim_open_win(buf, true, {
+		relative = "editor",
+		width = width,
+		height = height,
+		row = math.floor((vim.o.lines - height) / 2),
+		col = math.floor((vim.o.columns - width) / 2),
+		border = "rounded",
+		style = "minimal",
+		title = " 保存知识 - 输入标题和标签 ",
+		title_pos = "center",
+		footer = " <C-s> 保存     q 退出 ",
+		footer_pos = "center",
+	})
+
+	-- 自动检测的标签作为默认值
+	local detected_tags = detect_tags(content)
+	local default_tags = table.concat(detected_tags, ", ")
+
+	vim.api.nvim_buf_set_lines(buf, 0, -1, false, {
+		"=== Title ===",
+		"",
+		"",
+		"=== Tags (用逗号分隔) ===",
+		default_tags ~= "" and default_tags or "",
+		"",
+	})
+
+	vim.api.nvim_set_option_value("filetype", "markdown", { buf = buf })
+	vim.api.nvim_set_option_value("wrap", true, { win = win })
+	vim.api.nvim_set_option_value("linebreak", true, { win = win })
+	vim.api.nvim_set_option_value("modifiable", true, { buf = buf })
+	vim.api.nvim_set_option_value("winhighlight", "Normal:NormalFloat,FloatBorder:Special", { win = win })
+
+	-- 光标定位到标题输入区
+	vim.api.nvim_win_set_cursor(win, { 2, 0 })
+	vim.schedule(function()
+		vim.cmd("startinsert")
+	end)
+
+	-- 保存
+	vim.keymap.set("n", "<C-s>", function()
+		local buf_lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+		local title = buf_lines[2] or ""
+		local tags = buf_lines[5] or ""
+
+		local tags_list = split_tags(tags)
+
+		save_content(content, {
+			title = vim.trim(title) ~= "" and vim.trim(title) or nil,
+			tags = #tags_list > 0 and tags_list or nil,
+		})
+
+		vim.api.nvim_win_close(win, true)
+		vim.api.nvim_buf_delete(buf, { force = true })
+	end, { buffer = buf })
+
+	-- 退出
+	vim.keymap.set("n", "q", function()
+		vim.api.nvim_win_close(win, true)
+		vim.api.nvim_buf_delete(buf, { force = true })
+		vim.notify("已取消保存", vim.log.levels.INFO)
+	end, { buffer = buf })
 end
 
 function M.paste_from_clipboard()
-	save_content(vim.fn.getreg("+"))
+	local content = vim.fn.getreg("+")
+	if not content or content:match("^%s*$") then
+		vim.notify("剪贴板为空", vim.log.levels.WARN)
+		return
+	end
+
+	-- 创建输入窗口
+	local buf = vim.api.nvim_create_buf(false, true)
+	local width = math.floor(vim.o.columns * 0.6)
+	local height = 10
+
+	local win = vim.api.nvim_open_win(buf, true, {
+		relative = "editor",
+		width = width,
+		height = height,
+		row = math.floor((vim.o.lines - height) / 2),
+		col = math.floor((vim.o.columns - width) / 2),
+		border = "rounded",
+		style = "minimal",
+		title = " 保存知识 - 输入标题和标签 ",
+		title_pos = "center",
+		footer = " <C-s> 保存     q 退出 ",
+		footer_pos = "center",
+	})
+
+	-- 自动检测的标签作为默认值
+	local detected_tags = detect_tags(content)
+	local default_tags = table.concat(detected_tags, ", ")
+
+	vim.api.nvim_buf_set_lines(buf, 0, -1, false, {
+		"=== Title ===",
+		"",
+		"",
+		"=== Tags (用逗号分隔) ===",
+		default_tags ~= "" and default_tags or "",
+		"",
+	})
+
+	vim.api.nvim_set_option_value("filetype", "markdown", { buf = buf })
+	vim.api.nvim_set_option_value("wrap", true, { win = win })
+	vim.api.nvim_set_option_value("linebreak", true, { win = win })
+	vim.api.nvim_set_option_value("modifiable", true, { buf = buf })
+	vim.api.nvim_set_option_value("winhighlight", "Normal:NormalFloat,FloatBorder:Special", { win = win })
+
+	-- 光标定位到标题输入区
+	vim.api.nvim_win_set_cursor(win, { 2, 0 })
+	vim.schedule(function()
+		vim.cmd("startinsert")
+	end)
+
+	-- 保存
+	vim.keymap.set("n", "<C-s>", function()
+		local buf_lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+		local title = buf_lines[2] or ""
+		local tags = buf_lines[5] or ""
+
+		local tags_list = split_tags(tags)
+
+		save_content(content, {
+			title = vim.trim(title) ~= "" and vim.trim(title) or nil,
+			tags = #tags_list > 0 and tags_list or nil,
+		})
+
+		vim.api.nvim_win_close(win, true)
+		vim.api.nvim_buf_delete(buf, { force = true })
+	end, { buffer = buf })
+
+	-- 退出
+	vim.keymap.set("n", "q", function()
+		vim.api.nvim_win_close(win, true)
+		vim.api.nvim_buf_delete(buf, { force = true })
+		vim.notify("已取消保存", vim.log.levels.INFO)
+	end, { buffer = buf })
 end
 
 function M.rebuild_fts()
@@ -342,10 +495,16 @@ function M.open_paste_window()
 		footer_pos = "center",
 	})
 
-	-- 干净且友好的初始内容
+	-- 干净且友好的初始内容（包含标题和标签输入区）
 	vim.api.nvim_buf_set_lines(buf, 0, -1, false, {
+		"=== Title ===",
 		"",
-		"请直接在这里粘贴内容（Ctrl + V），然后可以随意编辑：",
+		"",
+		"=== Tags (用逗号分隔) ===",
+		"",
+		"",
+		"=== Content ===",
+		"请直接在这里粘贴内容，然后可以随意编辑：",
 		"",
 		"────────────────────────────────────────────────────────────",
 		"",
@@ -360,8 +519,8 @@ function M.open_paste_window()
 	-- 可选：给窗口添加一点背景高亮（让它更显眼）
 	vim.api.nvim_set_option_value("winhighlight", "Normal:NormalFloat,FloatBorder:Special", { win = win })
 
-	-- 光标定位到可编辑区域
-	vim.api.nvim_win_set_cursor(win, { 5, 0 })
+	-- 光标定位到标题输入区
+	vim.api.nvim_win_set_cursor(win, { 2, 0 })
 	vim.schedule(function()
 		vim.cmd("startinsert")
 	end)
@@ -370,20 +529,29 @@ function M.open_paste_window()
 	vim.keymap.set("n", "<C-s>", function()
 		local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
 
-		-- 跳过提示行
-		local start_idx = 1
+		-- 解析标题
+		local title = ""
+		local tags = ""
+		local content_start = 1
+
 		for i, line in ipairs(lines) do
-			if
-				line:match(
-					"^%s*────────────────────────────────"
-				)
-			then
-				start_idx = i + 1
+			if line == "=== Title ===" then
+				title = lines[i + 1] or ""
+			elseif line == "=== Tags (用逗号分隔) ===" then
+				tags = lines[i + 1] or ""
+			elseif line == "=== Content ===" then
+				-- 找到分隔线后的内容
+				for j = i + 1, #lines do
+					if lines[j]:match("^%s*────────────────────────────────") then
+						content_start = j + 1
+						break
+					end
+				end
 				break
 			end
 		end
 
-		local content = table.concat(vim.list_slice(lines, start_idx), "\n")
+		local content = table.concat(vim.list_slice(lines, content_start), "\n")
 		content = vim.trim(content)
 
 		if content == "" then
@@ -391,7 +559,13 @@ function M.open_paste_window()
 			return
 		end
 
-		save_content(content)
+		-- 处理 tags
+		local tags_list = split_tags(tags)
+
+		save_content(content, {
+			title = vim.trim(title) ~= "" and vim.trim(title) or nil,
+			tags = #tags_list > 0 and tags_list or nil,
+		})
 
 		vim.notify("已保存（未关闭窗口，可继续编辑）", vim.log.levels.INFO)
 		-- vim.api.nvim_win_close(win, true)
