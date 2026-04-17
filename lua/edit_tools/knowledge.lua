@@ -41,12 +41,10 @@ local function init_db()
 	db:eval("BEGIN TRANSACTION;")
 
 	-- 切换为 trigram tokenizer（支持中文子串搜索）
-	-- db:eval("DROP TABLE IF EXISTS knowledge_fts;")
-
 	db:eval([[
     CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_fts USING fts5(
       title, content, tags,
-      tokenize = 'unicode61 remove_diacritics 0',
+      tokenize = 'trigram',
       content = 'knowledge',
       content_rowid = 'id'
     );
@@ -76,18 +74,7 @@ local function init_db()
     END;
   ]])
 
-	-- 自动重建 FTS 索引（首次切换 tokenizer 时重要）
-	-- db:eval([[
-	--    INSERT INTO knowledge_fts(rowid, title, content, tags)
-	--    SELECT id, title, content, tags FROM knowledge
-	--    WHERE id NOT IN (SELECT rowid FROM knowledge_fts);
-	--  ]])
-	-- 因为是新数据库，暂时没有数据，不需要重建索引
-	-- 等你保存几条数据后，触发器会自动同步
-
 	db:eval("COMMIT;")
-
-	vim.notify("知识库数据库已重新创建（trigram FTS 已启用）", vim.log.levels.INFO)
 end
 
 local function ensure_db()
@@ -133,12 +120,11 @@ local function escape_fts(query)
 	if query == "" then
 		return ""
 	end
-	-- 对中文和英文都更友好：每个词后面加 *
 	local tokens = {}
 	for word in query:gmatch("%S+") do
-		table.insert(tokens, word .. "*")
+		table.insert(tokens, word) -- 去掉 *
 	end
-	return table.concat(tokens, " ")
+	return table.concat(tokens, " ") -- 空格分隔在 FTS5 中默认是 AND
 end
 
 local function parse_tag_query(query)
@@ -311,6 +297,28 @@ end
 
 function M.paste_from_clipboard()
 	save_content(vim.fn.getreg("+"))
+end
+
+function M.rebuild_fts()
+	ensure_db()
+	db:eval("DROP TABLE IF EXISTS knowledge_fts;")
+
+	db:eval([[
+        CREATE VIRTUAL TABLE knowledge_fts USING fts5(
+          title, content, tags,
+          tokenize = 'trigram',
+          content = 'knowledge',
+          content_rowid = 'id'
+        );
+    ]])
+
+	-- 重新填充索引
+	db:eval([[
+        INSERT INTO knowledge_fts(rowid, title, content, tags)
+        SELECT id, title, content, tags FROM knowledge;
+    ]])
+
+	vim.notify("知识库 FTS 已重建为 trigram 模式（中文单字/子串搜索已优化）", vim.log.levels.INFO)
 end
 
 function M.open_paste_window()
@@ -616,6 +624,7 @@ function M.setup()
 	vim.keymap.set("n", "<leader>ip", M.open_paste_window, { desc = "Paste window" })
 	vim.keymap.set("n", "<leader>ik", M.open, { desc = "Knowledge search" })
 	vim.keymap.set("n", "<leader>im", M.migrate_from_jsonl, { desc = "Migrate JSONL" })
+	vim.keymap.set("n", "<leader>ir", M.rebuild_fts, { desc = "Rebuild FTS index (trigram)" })
 end
 
 return M
