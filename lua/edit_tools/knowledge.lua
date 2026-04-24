@@ -889,6 +889,20 @@ function M.open()
 					vim.api.nvim_set_option_value("filetype", "markdown", { buf = bufnr })
 
 					if winid and vim.api.nvim_win_is_valid(winid) then
+						local width = vim.api.nvim_win_get_width(winid)
+						local height = vim.api.nvim_win_get_height(winid)
+
+						-- 重新配置窗口为 minimal 模式以适应 Telescope 预览区
+						vim.api.nvim_open_win(bufnr, true, {
+							relative = "win",
+							win = winid,
+							width = width,
+							height = height,
+							row = 0,
+							col = 0,
+							style = "minimal",
+						})
+
 						vim.api.nvim_set_option_value("wrap", true, { win = winid })
 						vim.api.nvim_set_option_value("linebreak", true, { win = winid })
 					end
