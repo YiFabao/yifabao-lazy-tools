@@ -806,11 +806,11 @@ function M.edit(id)
 		-- vim.api.nvim_win_close(win, true)
 		-- vim.api.nvim_buf_delete(buf, { force = true })
 
-		vim.schedule(function()
-			if M.open then
-				M.open()
-			end
-		end)
+		-- vim.schedule(function()
+		-- 	if M.open then
+		-- 		M.open()
+		-- 	end
+		-- end)
 	end, { buffer = buf })
 
 	-- 退出并返回列表
