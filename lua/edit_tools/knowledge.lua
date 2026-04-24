@@ -803,8 +803,8 @@ function M.edit(id)
 
 		vim.notify("知识 #" .. id .. " 已更新", vim.log.levels.INFO)
 
-		vim.api.nvim_win_close(win, true)
-		vim.api.nvim_buf_delete(buf, { force = true })
+		-- vim.api.nvim_win_close(win, true)
+		-- vim.api.nvim_buf_delete(buf, { force = true })
 
 		vim.schedule(function()
 			if M.open then
