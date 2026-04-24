@@ -889,20 +889,6 @@ function M.open()
 					vim.api.nvim_set_option_value("filetype", "markdown", { buf = bufnr })
 
 					if winid and vim.api.nvim_win_is_valid(winid) then
-						local width = vim.api.nvim_win_get_width(winid)
-						local height = vim.api.nvim_win_get_height(winid)
-
-						-- 重新配置窗口为 minimal 模式以适应 Telescope 预览区
-						vim.api.nvim_open_win(bufnr, true, {
-							relative = "win",
-							win = winid,
-							width = width,
-							height = height,
-							row = 0,
-							col = 0,
-							style = "minimal",
-						})
-
 						vim.api.nvim_set_option_value("wrap", true, { win = winid })
 						vim.api.nvim_set_option_value("linebreak", true, { win = winid })
 					end
@@ -1056,10 +1042,13 @@ function M.history_ui(id)
 					vim.api.nvim_buf_set_lines(buf, 0, -1, false, vim.split(v.content, "\n"))
 
 					vim.api.nvim_open_win(buf, true, {
-						relative = "editor",
+						relative = "win", -- 1. 改为相对于 Telescope 主窗口
 						width = math.floor(vim.o.columns * 0.8),
 						height = math.floor(vim.o.lines * 0.8),
-						border = "rounded",
+						row = 0, -- 2. 添加行坐标
+						col = 0, -- 3. 添加列坐标
+						style = "minimal", -- 4. 使用极简样式，去除边框等干扰
+						border = "rounded", -- 如果你想保留边框，可以保留此项
 					})
 				end
 
