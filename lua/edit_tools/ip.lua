@@ -3,11 +3,12 @@ local M = {}
 function M.format_selected_ips()
 	local bufnr = 0
 
+	-- 使用 getpos 获取选区起止位置（兼容性更好）
 	local start_pos = vim.fn.getpos("'<")
 	local end_pos = vim.fn.getpos("'>")
 
-	local start_line = start_pos[2] - 1
-	local end_line = end_pos[2]
+	local start_line = start_pos[2] - 1 -- 0-indexed
+	local end_line = end_pos[2] -- 非 inclusive
 
 	local lines = vim.api.nvim_buf_get_lines(bufnr, start_line, end_line, false)
 
