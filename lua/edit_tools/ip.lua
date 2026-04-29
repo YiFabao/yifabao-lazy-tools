@@ -3,6 +3,10 @@ local M = {}
 function M.format_selected_ips()
 	local bufnr = 0
 
+	-- 强制更新视觉选区标记（确保 '< 和 '> 是当前选区）
+	vim.fn.setpos("'<", vim.fn.getpos("v"))
+	vim.fn.setpos("'>", vim.fn.getpos("."))
+
 	-- 使用 getpos 获取选区起止位置（兼容性更好）
 	local start_pos = vim.fn.getpos("'<")
 	local end_pos = vim.fn.getpos("'>")
