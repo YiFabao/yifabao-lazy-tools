@@ -945,14 +945,15 @@ function M.open()
 					local value = entry.value
 
 					local header = {
-						"=== Knowledge Preview ===",
-						"Time : " .. (value.time or ""),
-						"Type : " .. (value.type or ""),
-						"Tags : " .. table.concat(value.tags, ", "),
-						"Title: " .. (value.title or ""),
-						"ID   : " .. (value.id or ""),
-						"",
-						"──────────────────────────────",
+						"╭────────────────────────────────────────────────╮",
+						string.format("│ ID: %-4s  Type: %-6s  Time: %-19s │", 
+							tostring(value.id or ""), 
+							value.type or "", 
+							value.time or ""),
+						string.format("│ Title: %-51s │", (value.title or ""):sub(1, 51)),
+						"╰────────────────────────────────────────────────╯",
+						"Tags: " .. table.concat(value.tags, ", "),
+						"──────────────────────────────────────────────────",
 						"",
 					}
 
@@ -1004,6 +1005,17 @@ function M.open()
 					end)
 				end
 
+				local function show_history()
+					local selection = action_state.get_selected_entry()
+					if not selection then
+						return
+					end
+					actions.close(prompt_bufnr)
+					vim.schedule(function()
+						M.history_ui(selection.value.id)
+					end)
+				end
+
 				map("i", "<CR>", insert_entry)
 				map("n", "<CR>", insert_entry)
 				map("i", "dd", delete_current)
@@ -1012,6 +1024,8 @@ function M.open()
 				map("n", "<C-e>", edit_current)
 				map("i", "ee", edit_current)
 				map("n", "ee", edit_current)
+				map("i", "<C-h>", show_history)
+				map("n", "<C-h>", show_history)
 
 				return true
 			end,
