@@ -1230,12 +1230,23 @@ function M.history_ui(id)
 					end, { buffer = buf1 })
 				end
 
+				local function go_back_to_main()
+					actions.close(prompt_bufnr)
+					vim.schedule(function()
+						M.open()
+					end)
+				end
+
 				map("i", "<CR>", rollback)
 				map("n", "<CR>", rollback)
 				map("i", "<C-d>", diff_with_current)
 				map("n", "<C-d>", diff_with_current)
 				map("i", "<C-r>", rollback)
 				map("n", "<C-r>", rollback)
+				map("i", "<C-b>", go_back_to_main)
+				map("n", "<C-b>", go_back_to_main)
+				map("i", "<Esc>", go_back_to_main)
+				map("n", "<Esc>", go_back_to_main)
 
 				return true
 			end,
