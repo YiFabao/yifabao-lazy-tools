@@ -1823,7 +1823,11 @@ function M.save_with_template()
 	end
 	table.insert(choices, "0. 不使用模板")
 	
-	local choice = vim.fn.inputchoice("选择模板:", choices, 1)
+	local prompt = "选择模板:\n" .. table.concat(choices, "\n") .. "\n\n输入编号: "
+	local choice_str = vim.fn.input(prompt)
+	vim.cmd("redraw")
+	local choice = tonumber(choice_str) or 0
+	
 	if choice == 0 or choice > #template_keys then
 		-- 不使用模板，直接保存
 		M.paste_from_clipboard()
