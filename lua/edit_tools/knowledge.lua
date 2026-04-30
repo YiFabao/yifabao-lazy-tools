@@ -85,21 +85,19 @@ local function init_db()
 	db = sqlite({ uri = db_path() })
 	db:open()
 
-	-- 迁移: 添加新字段到已有表
-	db_safe_eval([[
-		ALTER TABLE knowledge ADD COLUMN starred INTEGER DEFAULT 0;
-	]])
-	db_safe_eval([[
-		ALTER TABLE knowledge ADD COLUMN view_count INTEGER DEFAULT 0;
-	]])
-	db_safe_eval([[
-		ALTER TABLE knowledge ADD COLUMN date_added TEXT DEFAULT '';
-	]])
+	-- 迁移: 添加新字段到已有表 (静默处理重复字段错误)
+	local function safe_migrate(sql)
+		pcall(function()
+			db:eval(sql)
+		end)
+	end
+
+	safe_migrate([[ALTER TABLE knowledge ADD COLUMN starred INTEGER DEFAULT 0;]])
+	safe_migrate([[ALTER TABLE knowledge ADD COLUMN view_count INTEGER DEFAULT 0;]])
+	safe_migrate([[ALTER TABLE knowledge ADD COLUMN date_added TEXT DEFAULT '';]])
 
 	-- 初始化 date_added 为 time (如果为空)
-	db_safe_eval([[
-		UPDATE knowledge SET date_added = time WHERE date_added IS NULL OR date_added = '';
-	]])
+	safe_migrate([[UPDATE knowledge SET date_added = time WHERE date_added IS NULL OR date_added = '';]])
 
 	db_safe_eval([[
   CREATE TABLE IF NOT EXISTS knowledge_history (
