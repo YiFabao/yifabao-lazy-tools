@@ -1817,9 +1817,11 @@ function M.save_with_template()
 	-- 显示模板选择菜单
 	local choices = {}
 	local template_keys = {}
-	for i, (key, tmpl) in ipairs(templates) do
+	local i = 1
+	for key, tmpl in pairs(templates) do
 		table.insert(choices, string.format("%d. %s (%s)", i, tmpl.title, table.concat(tmpl.tags, ", ")))
 		table.insert(template_keys, key)
+		i = i + 1
 	end
 	table.insert(choices, "0. 不使用模板")
 	
