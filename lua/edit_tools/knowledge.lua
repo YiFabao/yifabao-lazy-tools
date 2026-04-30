@@ -85,6 +85,22 @@ local function init_db()
 	db = sqlite({ uri = db_path() })
 	db:open()
 
+	-- 迁移: 添加新字段到已有表
+	db_safe_eval([[
+		ALTER TABLE knowledge ADD COLUMN starred INTEGER DEFAULT 0;
+	]])
+	db_safe_eval([[
+		ALTER TABLE knowledge ADD COLUMN view_count INTEGER DEFAULT 0;
+	]])
+	db_safe_eval([[
+		ALTER TABLE knowledge ADD COLUMN date_added TEXT DEFAULT '';
+	]])
+
+	-- 初始化 date_added 为 time (如果为空)
+	db_safe_eval([[
+		UPDATE knowledge SET date_added = time WHERE date_added IS NULL OR date_added = '';
+	]])
+
 	db_safe_eval([[
   CREATE TABLE IF NOT EXISTS knowledge_history (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -106,6 +122,18 @@ local function init_db()
       tags TEXT DEFAULT '',
       title TEXT DEFAULT '',
       content TEXT NOT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      starred INTEGER DEFAULT 0,
+      view_count INTEGER DEFAULT 0,
+      date_added TEXT DEFAULT ''
+    );
+  ]])
+
+	-- 添加 tags 表用于标签管理
+	db_safe_eval([[
+    CREATE TABLE IF NOT EXISTS tag_aliases (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      tag_name TEXT NOT NULL UNIQUE,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
   ]])
@@ -197,6 +225,9 @@ local function rows_to_items(rows)
 			tags = split_tags(row.tags),
 			title = row.title or "",
 			text = row.content or "",
+			starred = row.starred or 0,
+			view_count = row.view_count or 0,
+			date_added = row.date_added or row.time,
 			raw = row,
 		})
 	end
@@ -221,8 +252,20 @@ end
 
 local function parse_tag_query(query)
 	local tag = query:match("tag:(%S+)")
-	local clean = query:gsub("tag:%S+", ""):gsub("^%s+", ""):gsub("%s+$", "")
-	return tag, clean
+	local type_filter = query:match("type:(%S+)")
+	local date_from, date_to = query:match("date:(%S+)%.%.(%S+)")
+	local starred = query:match("%[starred%]") or query:match("%[star%]")
+	
+	local clean = query
+		:gsub("tag:%S+", "")
+		:gsub("type:%S+", "")
+		:gsub("date:%S+%.%.%S+", "")
+		:gsub("%[starred%]", "")
+		:gsub("%[star%]", "")
+		:gsub("^%s+", "")
+		:gsub("%s+$", "")
+	
+	return tag, clean, type_filter, date_from, date_to, starred
 end
 
 -- =========================
@@ -521,7 +564,7 @@ local function search_db(query, limit)
 		return list_recent(limit)
 	end
 
-	local tag, clean = parse_tag_query(query)
+	local tag, clean, type_filter, date_from, date_to, starred = parse_tag_query(query)
 	local conditions = {}
 	local params = {}
 
@@ -542,10 +585,25 @@ local function search_db(query, limit)
 		table.insert(params, "%" .. tag .. "%")
 	end
 
+	if type_filter then
+		table.insert(conditions, "k.type = ?")
+		table.insert(params, type_filter)
+	end
+
+	if date_from and date_to then
+		table.insert(conditions, "k.date_added >= ? AND k.date_added <= ?")
+		table.insert(params, date_from)
+		table.insert(params, date_to)
+	end
+
+	if starred then
+		table.insert(conditions, "k.starred = 1")
+	end
+
 	local where_sql = #conditions > 0 and "WHERE " .. table.concat(conditions, " AND ") or ""
 	local sql = string.format(
 		[[
-    SELECT k.id, k.time, k.type, k.tags, k.title, k.content
+    SELECT k.id, k.time, k.type, k.tags, k.title, k.content, k.starred, k.view_count, k.date_added
     FROM knowledge k
     %s
     ORDER BY k.time DESC
@@ -901,6 +959,257 @@ function M.edit(id)
 end
 
 -- =========================
+-- Related items & Tag browser
+-- =========================
+function M.find_related(id, tags)
+	ensure_db()
+	
+	if not tags or #tags == 0 then
+		vim.notify("该条目没有标签，无法查找相关条目", vim.log.levels.WARN)
+		return
+	end
+	
+	-- 构建查询：查找共享至少一个标签的条目
+	local conditions = {}
+	local params = {}
+	
+	for _, tag in ipairs(tags) do
+		table.insert(conditions, "k.tags LIKE ?")
+		table.insert(params, "%" .. tag .. "%")
+	end
+	
+	local where = "(" .. table.concat(conditions, " OR ") .. ")"
+	table.insert(conditions, "k.id != ?")
+	table.insert(params, id)
+	
+	local sql = string.format([[
+		SELECT k.id, k.time, k.type, k.tags, k.title, k.content, k.starred, k.view_count, k.date_added
+		FROM knowledge k
+		WHERE %s
+		ORDER BY k.time DESC
+		LIMIT 50
+	]], table.concat(conditions, " AND "))
+	
+	local rows = db_safe_eval(sql, params)
+	if type(rows) ~= "table" or #rows == 0 then
+		vim.notify("没有找到相关条目", vim.log.levels.INFO)
+		return
+	end
+	
+	local pickers = require("telescope.pickers")
+	local finders = require("telescope.finders")
+	local previewers = require("telescope.previewers")
+	local conf = require("telescope.config").values
+	local actions = require("telescope.actions")
+	local action_state = require("telescope.actions.state")
+	
+	pickers
+		.new({}, {
+			prompt_title = string.format("相关条目 (基于 %d 个标签)", #tags),
+			finder = finders.new_table({
+				results = rows_to_items(rows),
+				entry_maker = function(entry)
+					local preview = entry.text:gsub("\n", " "):sub(1, 80)
+					local star_icon = entry.starred and entry.starred > 0 and "⭐ " or ""
+					return {
+						value = entry,
+						display = string.format(
+							"%s %-19s %-8s %-20s %s",
+							star_icon,
+							entry.time,
+							entry.type,
+							table.concat(entry.tags, ","),
+							preview
+						),
+						ordinal = table.concat({
+							entry.title,
+							entry.text,
+							table.concat(entry.tags, " "),
+						}, " "),
+					}
+				end,
+			}),
+			sorter = conf.generic_sorter({}),
+			previewer = previewers.new_buffer_previewer({
+				define_preview = function(self, entry)
+					local bufnr = self.state.bufnr
+					local value = entry.value
+					
+					local header = {
+						"=== 相关条目预览 ===",
+						"ID   : " .. (value.id or ""),
+						"Time : " .. (value.time or ""),
+						"Type : " .. (value.type or ""),
+						"Tags : " .. table.concat(value.tags, ", "),
+						"Title: " .. (value.title or ""),
+						"",
+						"──────────────────────────────",
+						"",
+					}
+					
+					local content_lines = vim.split(value.text or "", "\n")
+					vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, vim.list_extend(header, content_lines))
+					vim.api.nvim_set_option_value("filetype", "markdown", { buf = bufnr })
+				end,
+			}),
+			attach_mappings = function(prompt_bufnr, map)
+				local function insert_entry()
+					local selection = action_state.get_selected_entry()
+					actions.close(prompt_bufnr)
+					vim.api.nvim_put(vim.split(selection.value.text, "\n"), "c", true, true)
+				end
+				
+				map("i", "<CR>", insert_entry)
+				map("n", "<CR>", insert_entry)
+				return true
+			end,
+		})
+		:find()
+end
+
+function M.tag_browser()
+	ensure_db()
+	
+	-- 获取所有标签及其计数
+	local rows = db_safe_eval([[
+		SELECT tags FROM knowledge WHERE tags != ''
+	]])
+	
+	if not rows or #rows == 0 then
+		vim.notify("没有标签数据", vim.log.levels.WARN)
+		return
+	end
+	
+	local tag_counts = {}
+	for _, row in ipairs(rows) do
+		local tags = split_tags(row.tags)
+		for _, tag in ipairs(tags) do
+			tag_counts[tag] = (tag_counts[tag] or 0) + 1
+		end
+	end
+	
+	-- 转换为列表并排序
+	local tag_list = {}
+	for tag, count in pairs(tag_counts) do
+		table.insert(tag_list, { tag = tag, count = count })
+	end
+	table.sort(tag_list, function(a, b) return a.count > b.count end)
+	
+	local pickers = require("telescope.pickers")
+	local finders = require("telescope.finders")
+	local conf = require("telescope.config").values
+	local actions = require("telescope.actions")
+	local action_state = require("telescope.actions.state")
+	
+	pickers
+		.new({}, {
+			prompt_title = "Tag Browser (按计数排序)",
+			finder = finders.new_table({
+				results = tag_list,
+				entry_maker = function(entry)
+					return {
+						value = entry,
+						display = string.format("#%-20s %d 条", entry.tag, entry.count),
+						ordinal = entry.tag,
+					}
+				end,
+			}),
+			sorter = conf.generic_sorter({}),
+			attach_mappings = function(prompt_bufnr, map)
+				local function search_by_tag()
+					local selection = action_state.get_selected_entry()
+					actions.close(prompt_bufnr)
+					vim.schedule(function()
+						M.open_with_filter("tag:" .. selection.value.tag)
+					end)
+				end
+				
+				map("i", "<CR>", search_by_tag)
+				map("n", "<CR>", search_by_tag)
+				return true
+			end,
+		})
+		:find()
+end
+
+function M.open_with_filter(filter)
+	ensure_db()
+	
+	local pickers = require("telescope.pickers")
+	local finders = require("telescope.finders")
+	local previewers = require("telescope.previewers")
+	local conf = require("telescope.config").values
+	local actions = require("telescope.actions")
+	local action_state = require("telescope.actions.state")
+	
+	pickers
+		.new({}, {
+			prompt_title = "Knowledge: " .. filter,
+			prompt_initial = filter,
+			finder = finders.new_dynamic({
+				fn = function(prompt)
+					return search_db(prompt, 200)
+				end,
+				entry_maker = function(entry)
+					local preview = entry.text:gsub("\n", " "):sub(1, 80)
+					local star_icon = entry.starred and entry.starred > 0 and "⭐ " or ""
+					return {
+						value = entry,
+						display = string.format(
+							"%s %-19s %-8s %-20s %s",
+							star_icon,
+							entry.time,
+							entry.type,
+							table.concat(entry.tags, ","),
+							preview
+						),
+						ordinal = table.concat({
+							entry.title,
+							entry.text,
+							table.concat(entry.tags, " "),
+						}, " "),
+					}
+				end,
+			}),
+			sorter = conf.generic_sorter({}),
+			previewer = previewers.new_buffer_previewer({
+				define_preview = function(self, entry)
+					local bufnr = self.state.bufnr
+					local value = entry.value
+					
+					local header = {
+						"=== Knowledge Preview ===",
+						"ID   : " .. (value.id or ""),
+						"Time : " .. (value.time or ""),
+						"Type : " .. (value.type or ""),
+						"Tags : " .. table.concat(value.tags, ", "),
+						"Title: " .. (value.title or ""),
+						"",
+						"──────────────────────────────",
+						"",
+					}
+					
+					local content_lines = vim.split(value.text or "", "\n")
+					vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, vim.list_extend(header, content_lines))
+					vim.api.nvim_set_option_value("filetype", "markdown", { buf = bufnr })
+				end,
+			}),
+			attach_mappings = function(prompt_bufnr, map)
+				local function insert_entry()
+					local selection = action_state.get_selected_entry()
+					actions.close(prompt_bufnr)
+					vim.api.nvim_put(vim.split(selection.value.text, "\n"), "c", true, true)
+				end
+				
+				map("i", "<CR>", insert_entry)
+				map("n", "<CR>", insert_entry)
+				return true
+			end,
+		})
+		:find()
+end
+
+-- =========================
 -- telescope
 -- =========================
 function M.open()
@@ -916,18 +1225,23 @@ function M.open()
 			prompt_title = "Knowledge Base",
 			finder = finders.new_dynamic({
 				fn = function(prompt)
-					return search_db(prompt, 100)
+					return search_db(prompt, 200)
 				end,
 				entry_maker = function(entry)
 					local preview = entry.text:gsub("\n", " "):sub(1, 80)
+					local star_icon = entry.starred and entry.starred > 0 and "⭐ " or ""
+					local view_info = entry.view_count and entry.view_count > 0 and string.format("👁%d", entry.view_count) or ""
+					
 					return {
 						value = entry,
 						display = string.format(
-							"%-19s %-8s %-20s %s",
+							"%s %-19s %-8s %-20s %s %s",
+							star_icon,
 							entry.time,
 							entry.type,
 							table.concat(entry.tags, ","),
-							preview
+							preview,
+							view_info
 						),
 						ordinal = table.concat({
 							entry.title,
@@ -953,6 +1267,10 @@ function M.open()
 						string.format("│ Title: %-51s │", (value.title or ""):sub(1, 51)),
 						"╰────────────────────────────────────────────────╯",
 						"Tags: " .. table.concat(value.tags, ", "),
+						string.format("⭐ %s | 👁 查看次数: %d | 📅 添加日期: %s", 
+							value.starred and value.starred > 0 and "已收藏" or "未收藏",
+							value.view_count or 0,
+							value.date_added or value.time),
 						"──────────────────────────────────────────────────",
 						"",
 					}
@@ -982,6 +1300,11 @@ function M.open()
 				local function insert_entry()
 					local selection = action_state.get_selected_entry()
 					actions.close(prompt_bufnr)
+					
+					-- 增加查看次数
+					ensure_db()
+					db_safe_eval("UPDATE knowledge SET view_count = COALESCE(view_count, 0) + 1 WHERE id = ?", { selection.value.id })
+					
 					vim.api.nvim_put(vim.split(selection.value.text, "\n"), "c", true, true)
 				end
 
@@ -1016,6 +1339,120 @@ function M.open()
 					end)
 				end
 
+				local function toggle_star()
+					local selection = action_state.get_selected_entry()
+					if not selection then
+						return
+					end
+					local id = selection.value.id
+					local current_star = selection.value.starred or 0
+					local new_val = current_star > 0 and 0 or 1
+					
+					ensure_db()
+					db_safe_eval("UPDATE knowledge SET starred = ? WHERE id = ?", { new_val, id })
+					
+					vim.notify(
+						new_val > 0 and "已添加收藏 ⭐" or "已取消收藏",
+						vim.log.levels.INFO
+					)
+					
+					-- 刷新列表
+					actions._close(prompt_bufnr)
+					vim.schedule(function()
+						M.open()
+					end)
+				end
+
+				local function batch_add_tags()
+					local tag = vim.fn.input("添加标签: ")
+					if tag == "" then return end
+					
+					local picker = action_state.get_current_picker(prompt_bufnr)
+					local selected = picker:get_multi_selection()
+					
+					if #selected == 0 then
+						-- 如果没有多选，对当前选中的操作
+						local selection = action_state.get_selected_entry()
+						if not selection then return end
+						selected = { selection }
+					end
+					
+					ensure_db()
+					local count = 0
+					for _, item in ipairs(selected) do
+						local current_tags = item.value.tags or {}
+						-- 检查标签是否已存在
+						local exists = false
+						for _, t in ipairs(current_tags) do
+							if t == tag then
+								exists = true
+								break
+							end
+						end
+						if not exists then
+							table.insert(current_tags, tag)
+							local tag_str = table.concat(current_tags, ",")
+							db_safe_eval("UPDATE knowledge SET tags = ? WHERE id = ?", { tag_str, item.value.id })
+							count = count + 1
+						end
+					end
+					
+					vim.notify(string.format("已为 %d 个条目添加标签: %s", count, tag), vim.log.levels.INFO)
+					actions._close(prompt_bufnr)
+					vim.schedule(function()
+						M.open()
+					end)
+				end
+
+				local function batch_export_selected()
+					local picker = action_state.get_current_picker(prompt_bufnr)
+					local selected = picker:get_multi_selection()
+					
+					if #selected == 0 then
+						local selection = action_state.get_selected_entry()
+						if not selection then return end
+						selected = { selection }
+					end
+					
+					local data = {}
+					for _, item in ipairs(selected) do
+						table.insert(data, {
+							id = item.value.id,
+							time = item.value.time,
+							type = item.value.type,
+							tags = item.value.tags,
+							title = item.value.title,
+							content = item.value.text,
+						})
+					end
+					
+					local export_path = vim.fn.expand("~/knowledge_batch_" .. os.date("%Y%m%d_%H%M%S") .. ".json")
+					local f = io.open(export_path, "w")
+					if f then
+						f:write(vim.json.encode(data))
+						f:close()
+						vim.notify(string.format("已导出 %d 个条目到: %s", #data, export_path), vim.log.levels.INFO)
+					else
+						vim.notify("无法写入文件", vim.log.levels.ERROR)
+					end
+				end
+
+				local function find_related()
+					local selection = action_state.get_selected_entry()
+					if not selection then return end
+					
+					local tags = selection.value.tags
+					if #tags == 0 then
+						vim.notify("该条目没有标签，无法查找相关条目", vim.log.levels.WARN)
+						return
+					end
+					
+					actions.close(prompt_bufnr)
+					vim.schedule(function()
+						M.find_related(selection.value.id, tags)
+					end)
+				end
+
 				map("i", "<CR>", insert_entry)
 				map("n", "<CR>", insert_entry)
 				map("i", "dd", delete_current)
@@ -1026,6 +1463,14 @@ function M.open()
 				map("n", "ee", edit_current)
 				map("i", "<C-h>", show_history)
 				map("n", "<C-h>", show_history)
+				map("i", "<C-s>", toggle_star)
+				map("n", "<C-s>", toggle_star)
+				map("i", "<C-t>", batch_add_tags)
+				map("n", "<C-t>", batch_add_tags)
+				map("i", "<C-x>", batch_export_selected)
+				map("n", "<C-x>", batch_export_selected)
+				map("i", "<C-r>", find_related)
+				map("n", "<C-r>", find_related)
 
 				return true
 			end,
@@ -1332,6 +1777,246 @@ function M.rollback(id, version)
 end
 
 -- =========================
+-- Template System
+-- =========================
+local templates = {
+	code_snippet = {
+		title = "代码片段",
+		tags = { "code", "snippet" },
+		content = "--- 代码片段 ---\n\n语言: \n描述: \n\n```",
+	},
+	command = {
+		title = "命令记录",
+		tags = { "command", "shell" },
+		content = "--- 命令 ---\n\n用途: \n\n```bash\n\n```\n\n输出:\n\n```\n\n```",
+	},
+	config = {
+		title = "配置记录",
+		tags = { "config", "settings" },
+		content = "--- 配置 ---\n\n用途: \n文件位置: \n\n```",
+	},
+	troubleshooting = {
+		title = "问题排查",
+		tags = { "troubleshooting", "debug" },
+		content = "--- 问题排查 ---\n\n问题描述:\n\n原因分析:\n\n解决方案:\n\n",
+	},
+	note = {
+		title = "笔记",
+		tags = { "note" },
+		content = "--- 笔记 ---\n\n主题: \n\n",
+	},
+}
+
+function M.save_with_template()
+	local content = vim.fn.getreg("+")
+	if not content or content:match("^%s*$") then
+		vim.notify("剪贴板为空", vim.log.levels.WARN)
+		return
+	end
+	
+	-- 显示模板选择菜单
+	local choices = {}
+	local template_keys = {}
+	for i, (key, tmpl) in ipairs(templates) do
+		table.insert(choices, string.format("%d. %s (%s)", i, tmpl.title, table.concat(tmpl.tags, ", ")))
+		table.insert(template_keys, key)
+	end
+	table.insert(choices, "0. 不使用模板")
+	
+	local choice = vim.fn.inputchoice("选择模板:", choices, 1)
+	if choice == 0 or choice > #template_keys then
+		-- 不使用模板，直接保存
+		M.paste_from_clipboard()
+		return
+	end
+	
+	local tmpl = templates[template_keys[choice]]
+	local default_tags = table.concat(tmpl.tags, ", ")
+	
+	local initial_lines = {
+		"=== Title ===",
+		tmpl.title,
+		"",
+		"=== Tags (用逗号分隔) ===",
+		default_tags,
+		"",
+	}
+	
+	local buf, win, state = create_input_window({
+		title = " 保存知识 - 使用模板: " .. tmpl.title,
+		footer = " <C-s> 保存     q 退出 ",
+		initial_lines = initial_lines,
+		width = math.floor(vim.o.columns * 0.6),
+		height = 10,
+		on_save = function(buf, win, state)
+			local buf_lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+			local title = buf_lines[2] or ""
+			local tags = buf_lines[5] or ""
+			local tags_list = split_tags(tags)
+			
+			-- 合并模板标签和用户标签
+			local all_tags = {}
+			local seen = {}
+			for _, t in ipairs(tmpl.tags) do
+				if not seen[t] then
+					table.insert(all_tags, t)
+					seen[t] = true
+				end
+			end
+			for _, t in ipairs(tags_list) do
+				if not seen[t] then
+					table.insert(all_tags, t)
+					seen[t] = true
+				end
+			end
+			
+			local saved_id = save_content(content, {
+				id = state.id,
+				title = vim.trim(title) ~= "" and vim.trim(title) or tmpl.title,
+				tags = all_tags,
+			})
+			
+			if not state.id then
+				state.id = saved_id
+			end
+			
+			vim.api.nvim_win_close(win, true)
+			vim.api.nvim_buf_delete(buf, { force = true })
+		end,
+	})
+end
+
+-- =========================
+-- Auto Backup
+-- =========================
+function M.auto_backup()
+	ensure_db()
+	
+	local backup_dir = vim.fn.stdpath("data") .. "/edit-tools/backups"
+	vim.fn.mkdir(backup_dir, "p")
+	
+	local backup_path = backup_dir .. "/knowledge_backup_" .. os.date("%Y%m%d_%H%M%S") .. ".json"
+	
+	local rows = db_safe_eval([[
+		SELECT id, time, type, tags, title, content, starred, view_count
+		FROM knowledge
+		ORDER BY id
+	]])
+	
+	if not rows or #rows == 0 then
+		vim.notify("知识库为空，跳过备份", vim.log.levels.INFO)
+		return
+	end
+	
+	local data = {}
+	for _, row in ipairs(rows) do
+		table.insert(data, {
+			id = row.id,
+			time = row.time,
+			type = row.type,
+			tags = split_tags(row.tags),
+			title = row.title,
+			content = row.content,
+			starred = row.starred,
+			view_count = row.view_count,
+		})
+	end
+	
+	local f = io.open(backup_path, "w")
+	if f then
+		f:write(vim.json.encode(data))
+		f:close()
+		vim.notify(string.format("已自动备份到: %s (%d 条)", backup_path, #data), vim.log.levels.INFO)
+		
+		-- 清理旧备份（保留最近 10 个）
+		local backup_files = {}
+		for file in vim.fn.glob(backup_dir .. "/knowledge_backup_*.json"):gmatch("[^\n]+") do
+			table.insert(backup_files, file)
+		end
+		table.sort(backup_files)
+		
+		if #backup_files > 10 then
+			for i = 1, #backup_files - 10 do
+				vim.fn.delete(backup_files[i])
+			end
+		end
+	else
+		vim.notify("备份失败: 无法写入文件", vim.log.levels.ERROR)
+	end
+end
+
+function M.list_backups()
+	local backup_dir = vim.fn.stdpath("data") .. "/edit-tools/backups"
+	
+	local backup_files = {}
+	for file in vim.fn.glob(backup_dir .. "/knowledge_backup_*.json"):gmatch("[^\n]+") do
+		local stat = vim.fn.getfsize(file)
+		table.insert(backup_files, {
+			path = file,
+			name = vim.fn.fnamemodify(file, ":t"),
+			size = stat,
+		})
+	end
+	
+	if #backup_files == 0 then
+		vim.notify("没有备份文件", vim.log.levels.INFO)
+		return
+	end
+	
+	table.sort(backup_files, function(a, b) return a.name > b.name end)
+	
+	local pickers = require("telescope.pickers")
+	local finders = require("telescope.finders")
+	local conf = require("telescope.config").values
+	local actions = require("telescope.actions")
+	local action_state = require("telescope.actions.state")
+	
+	pickers
+		.new({}, {
+			prompt_title = "知识库备份列表",
+			finder = finders.new_table({
+				results = backup_files,
+				entry_maker = function(entry)
+					return {
+						value = entry,
+						display = string.format("%-50s (%.1f KB)", entry.name, entry.size / 1024),
+						ordinal = entry.name,
+					}
+				end,
+			}),
+			sorter = conf.generic_sorter({}),
+			attach_mappings = function(prompt_bufnr, map)
+				local function restore_backup()
+					local selection = action_state.get_selected_entry()
+					local confirm = vim.fn.confirm("确认恢复备份?\n" .. selection.value.name, "&Yes\n&No", 2)
+					if confirm == 1 then
+						M.import(selection.value.path)
+						actions.close(prompt_bufnr)
+					end
+				end
+				
+				local function delete_backup()
+					local selection = action_state.get_selected_entry()
+					local confirm = vim.fn.confirm("确认删除备份?\n" .. selection.value.name, "&Yes\n&No", 2)
+					if confirm == 1 then
+						vim.fn.delete(selection.value.path)
+						vim.notify("已删除备份", vim.log.levels.INFO)
+						actions.close(prompt_bufnr)
+						vim.schedule(M.list_backups)
+					end
+				end
+				
+				map("i", "<CR>", restore_backup)
+				map("n", "<CR>", restore_backup)
+				map("i", "dd", delete_backup)
+				map("n", "dd", delete_backup)
+				return true
+			end,
+		})
+		:find()
+end
+
+-- =========================
 -- Statistics (按类型/标签计数)
 -- =========================
 function M.statistics()
@@ -1613,6 +2298,10 @@ function M.setup(opts)
 		statistics = "<leader>ist",
 		export = "<leader>ie",
 		import = "<leader>ii",
+		tag_browser = "<leader>it",
+		save_template = "<leader>iw",
+		auto_backup = "<leader>ib",
+		list_backups = "<leader>il",
 	}
 
 	-- 合并用户配置
@@ -1641,6 +2330,10 @@ function M.setup(opts)
 			M.import(path)
 		end
 	end, { desc = "Import knowledge base" })
+	vim.keymap.set("n", keymaps.tag_browser, M.tag_browser, { desc = "Browse tags" })
+	vim.keymap.set("n", keymaps.save_template, M.save_with_template, { desc = "Save with template" })
+	vim.keymap.set("n", keymaps.auto_backup, M.auto_backup, { desc = "Auto backup" })
+	vim.keymap.set("n", keymaps.list_backups, M.list_backups, { desc = "List backups" })
 
 	-- 添加命令支持
 	vim.api.nvim_create_user_command("KnowledgeList", function()
@@ -1667,6 +2360,22 @@ function M.setup(opts)
 	vim.api.nvim_create_user_command("KnowledgeRebuildFTS", function()
 		M.rebuild_fts()
 	end, { desc = "Rebuild FTS index" })
+
+	vim.api.nvim_create_user_command("KnowledgeTags", function()
+		M.tag_browser()
+	end, { desc = "Browse tags" })
+
+	vim.api.nvim_create_user_command("KnowledgeBackup", function()
+		M.auto_backup()
+	end, { desc = "Backup knowledge base" })
+
+	vim.api.nvim_create_user_command("KnowledgeBackups", function()
+		M.list_backups()
+	end, { desc = "List backups" })
+
+	vim.api.nvim_create_user_command("KnowledgeTemplate", function()
+		M.save_with_template()
+	end, { desc = "Save with template" })
 end
 
 return M

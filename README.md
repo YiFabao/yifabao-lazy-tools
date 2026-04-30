@@ -20,16 +20,11 @@
 - `<leader>ip` - 提取选区中的所有 IP（CIDR + 单IP）
 - `<leader>ic` - 仅提取 CIDR IP（向后兼容）
 
-**使用示例：**
-1. 在 visual 模式下选中包含 IP 地址的文本
-2. 按 `<leader>ip`
-3. 选区将被格式化的 IP 列表替换
-
 ### 📚 知识库管理 (`knowledge.lua`)
 
 基于 SQLite + FTS5 的本地知识库系统，支持全文搜索。
 
-**核心功能：**
+#### 核心功能
 - ✅ 保存视觉选区或剪贴板内容
 - ✅ 全文搜索（支持中文 trigram 分词）
 - ✅ 标签系统（自动检测 + 手动添加）
@@ -38,8 +33,17 @@
 - ✅ 批量导出/导入（JSON/JSONL/Markdown）
 - ✅ 统计分析（按类型/标签分布）
 - ✅ Telescope 集成（实时搜索预览）
+- ✅ ⭐ 收藏/星标重要条目
+- ✅ 👁 使用频率统计
+- 🔥 **高级搜索**：`tag:neovim type:code date:2024-01-01..2024-12-31 [starred]`
+- 🔥 **批量操作**：多选添加标签/导出
+- 🔥 **相关条目**：基于标签推荐相似内容
+- 🔥 **标签浏览器**：查看所有标签 + 计数
+- 🔥 **模板系统**：预定义模板快速保存
+- 🔥 **自动备份**：定期备份 + 备份管理
+- 🔥 **Markdown 高亮**：Treesitter 语法着色
 
-**默认键映射：**
+#### 默认键映射
 | 快捷键 | 功能 |
 |--------|------|
 | `<leader>is` | 保存视觉选区 |
@@ -50,27 +54,43 @@
 | `<leader>ist` | 统计信息 |
 | `<leader>ie` | 导出数据 |
 | `<leader>ii` | 导入数据 |
+| `<leader>it` | 标签浏览器 |
+| `<leader>iw` | 使用模板保存 |
+| `<leader>ib` | 自动备份 |
+| `<leader>il` | 备份列表 |
 | `<leader>im` | JSONL 迁移 |
 | `<leader>ir` | 重建 FTS 索引 |
 
-**Telescope 操作：**
+#### Telescope 操作（主搜索界面）
 | 快捷键 | 功能 |
 |--------|------|
 | `<CR>` | 插入选中的内容 |
 | `dd` | 删除当前条目 |
 | `<C-e>` / `ee` | 编辑当前条目 |
 | `<C-h>` | 查看历史版本 |
-| `<C-d>` | 对比当前与历史版本（历史页面） |
-| `<C-r>` | 回滚到指定版本（历史页面） |
-| `<C-b>` / `<Esc>` | 返回主搜索界面（历史页面） |
+| `<C-s>` | 收藏/取消收藏 ⭐ |
+| `<C-t>` | 批量添加标签（支持多选） |
+| `<C-x>` | 批量导出选中条目 |
+| `<C-r>` | 查找相关条目（基于标签） |
 
-**命令支持：**
+#### Telescope 操作（历史界面）
+| 快捷键 | 功能 |
+|--------|------|
+| `<CR>` / `<C-r>` | 回滚到指定版本 |
+| `<C-d>` | 对比当前与历史版本 |
+| `<C-b>` / `<Esc>` | 返回主搜索界面 |
+
+#### 命令支持
 ```vim
 :KnowledgeList          " 打开知识库搜索
 :KnowledgeStats         " 显示统计信息
 :KnowledgeExport [fmt]  " 导出 (json/jsonl/markdown)
 :KnowledgeImport <file> " 从文件导入
 :KnowledgeRebuildFTS    " 重建 FTS 索引
+:KnowledgeTags          " 标签浏览器
+:KnowledgeBackup        " 自动备份
+:KnowledgeBackups       " 备份列表
+:KnowledgeTemplate      " 使用模板保存
 ```
 
 ## 安装
@@ -80,12 +100,16 @@
 ```lua
 {
   dir = "/path/to/yifabao-lazy-tools",
+  dependencies = {
+    "tami5/sqlite.lua",
+    "nvim-telescope/telescope.nvim",
+  },
   config = function()
     require("edit_tools").setup({
       -- 可选配置
       ip = {
         keymap = "<leader>ip",           -- 自定义 IP 提取快捷键
-        enable_legacy_keymap = true,     -- 启用 <leader>ic 快捷键
+        enable_legacy_keymap = true,     -- 启用 <leader>ic (仅 CIDR)
       },
       knowledge = {
         keymaps = {
@@ -99,6 +123,10 @@
           statistics = "<leader>ist",
           export = "<leader>ie",
           import = "<leader>ii",
+          tag_browser = "<leader>it",
+          save_template = "<leader>iw",
+          auto_backup = "<leader>ib",
+          list_backups = "<leader>il",
         },
       },
     })
@@ -112,69 +140,87 @@
 - [sqlite.lua](https://github.com/tami5/sqlite.lua)
 - [telescope.nvim](https://github.com/nvim-telescope/telescope.nvim)（知识库搜索）
 
-## 配置说明
+## 高级用法
 
-### IP 工具配置
+### 🔍 高级搜索语法
 
-```lua
-ip = {
-  keymap = "<leader>ip",           -- 主快捷键
-  enable_legacy_keymap = true,     -- 是否启用 <leader>ic (仅 CIDR)
-}
+支持组合查询条件：
+
+```
+# 按标签搜索
+tag:neovim vim configuration
+
+# 按类型过滤
+type:sql SELECT * FROM
+
+# 按日期范围
+date:2024-01-01..2024-12-31
+
+# 只看收藏的条目
+[starred] 或 [star]
+
+# 组合使用
+tag:neovim type:code date:2024-01-01..2024-12-31
 ```
 
-### 知识库配置
+### 📝 模板系统
 
-```lua
-knowledge = {
-  keymaps = {
-    -- 自定义所有快捷键
-    knowledge_search = "<leader>ik",
-    statistics = "<leader>ist",
-    -- ... 其他键映射
-  },
-}
-```
+保存时可选择预定义模板：
+
+- **代码片段** - 适合保存代码示例
+- **命令记录** - 保存命令及输出
+- **配置记录** - 配置文件及说明
+- **问题排查** - 问题描述及解决方案
+- **笔记** - 通用笔记模板
+
+使用 `<leader>iw` 调用模板保存。
+
+### 🏷 标签管理
+
+使用 `<leader>it` 打开标签浏览器：
+- 查看所有标签及使用次数
+- 点击标签快速搜索相关内容
+
+### 📊 批量操作
+
+在 Telescope 搜索界面：
+1. 按 `Tab` 多选条目
+2. 按 `<C-t>` 批量添加标签
+3. 按 `<C-x>` 批量导出选中
+
+### ⭐ 收藏系统
+
+- 按 `<C-s>` 收藏/取消收藏
+- 使用 `[starred]` 搜索只看收藏
+- 收藏条目在列表中显示 ⭐ 图标
+
+### 📁 备份管理
+
+- `<leader>ib` - 立即备份
+- `<leader>il` - 查看备份列表
+- 自动保留最近 10 个备份
+- 支持恢复/删除备份
+
+### 🔗 相关条目
+
+在搜索界面按 `<C-r>` 查找与当前条目共享标签的相关内容。
 
 ## 数据存储
 
 知识库数据存储在 Neovim 的数据目录中：
 - **数据库**: `~/.local/share/nvim/edit-tools/knowledge.db`
+- **备份目录**: `~/.local/share/nvim/edit-tools/backups/`
 - **历史表**: `knowledge_history`（版本历史）
-- **主表**: `knowledge`（当前条目）
+- **主表**: `knowledge`（当前条目，含 starred/view_count 字段）
 - **全文索引**: `knowledge_fts`（FTS5 trigram 索引）
 
-## 高级用法
+## 性能优化
 
-### 标签搜索
-在 Telescope 搜索框中使用 `tag:neovim` 来搜索特定标签：
-```
-tag:neovim vim configuration
-```
-
-### 版本回滚
-1. 按 `<leader>ih` 输入知识 ID
-2. 在历史列表中选择版本
-3. 按 `<C-r>` 回滚到该版本
-
-### 数据备份
-```bash
-# 导出为 JSON
-:KnowledgeExport json
-
-# 导出为 JSONL（兼容旧版本）
-:KnowledgeExport jsonl
-
-# 导出为可读文档
-:KnowledgeExport markdown
-```
-
-### 性能优化
-
-知识库内置了缓存机制：
-- 类型检测缓存（最多 500 条）
-- 标签检测缓存（最多 500 条）
-- LRU 淘汰策略
+知识库内置了多项优化：
+- 类型/标签检测缓存（LRU，最多 500 条）
+- 分页加载（limit 200）
+- 增量索引重建（trigger 自动更新）
+- 数据库连接池（复用连接）
 
 ## 贡献
 
