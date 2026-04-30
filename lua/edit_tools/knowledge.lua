@@ -1091,7 +1091,7 @@ function M.history_ui(id)
 		{ id }
 	)
 
-	if not rows or #rows == 0 then
+	if not rows or type(rows) ~= "table" or #rows == 0 then
 		vim.notify("没有历史版本", vim.log.levels.WARN)
 		return
 	end
