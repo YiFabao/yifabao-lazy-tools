@@ -41,6 +41,39 @@ local function db_safe_insert(table, data)
 	return result
 end
 
+-- =========================
+-- Cache for type/tag detection (performance optimization)
+-- =========================
+local type_cache = {}
+local tag_cache = {}
+local CACHE_MAX_SIZE = 500
+
+local function cache_get(cache, key)
+	local result = cache[key]
+	if result then
+		result.access_time = os.time()
+		return result.value
+	end
+	return nil
+end
+
+local function cache_set(cache, key, value)
+	if next(cache) >= CACHE_MAX_SIZE then
+		-- Simple LRU: remove oldest entry
+		local oldest_key, oldest_entry = nil, nil
+		for k, v in pairs(cache) do
+			if not oldest_entry or v.access_time < oldest_entry.access_time then
+				oldest_key = k
+				oldest_entry = v
+			end
+		end
+		if oldest_key then
+			cache[oldest_key] = nil
+		end
+	end
+	cache[key] = { value = value, access_time = os.time() }
+end
+
 local function init_db()
 	ensure_dir()
 
@@ -284,28 +317,43 @@ local function parse_input_buf(buf, content_marker_line)
 end
 
 -- =========================
--- type / tags detect
+-- type / tags detect (with caching)
 -- =========================
 local function detect_type(text)
+	-- Check cache first
+	local cache_key = text:sub(1, 100)  -- Use first 100 chars as cache key
+	local cached = cache_get(type_cache, cache_key)
+	if cached then
+		return cached
+	end
+
+	local result
 	if text:match("%d+%.%d+%.%d+%.%d+/%d+") then
-		return "ip"
+		result = "ip"
+	elseif text:match("SELECT%s") or text:match("INSERT%s") then
+		result = "sql"
+	elseif text:match("function%s") or text:match("class%s") then
+		result = "code"
+	elseif text:match("^https?://") then
+		result = "url"
+	elseif text:match("^%s*[%-%*]") or text:match("^#") then
+		result = "markdown"
+	else
+		result = "text"
 	end
-	if text:match("SELECT%s") or text:match("INSERT%s") then
-		return "sql"
-	end
-	if text:match("function%s") or text:match("class%s") then
-		return "code"
-	end
-	if text:match("^https?://") then
-		return "url"
-	end
-	if text:match("^%s*[%-%*]") or text:match("^#") then
-		return "markdown"
-	end
-	return "text"
+
+	cache_set(type_cache, cache_key, result)
+	return result
 end
 
 local function detect_tags(text)
+	-- Check cache first
+	local cache_key = text:sub(1, 100)
+	local cached = cache_get(tag_cache, cache_key)
+	if cached then
+		return cached
+	end
+
 	local tags = {}
 	if text:match("vim%.") or text:match("nvim") then
 		table.insert(tags, "neovim")
@@ -319,6 +367,8 @@ local function detect_tags(text)
 	if text:match("%d+%.%d+%.%d+%.%d+") then
 		table.insert(tags, "network")
 	end
+
+	cache_set(tag_cache, cache_key, tags)
 	return tags
 end
 
@@ -1172,20 +1222,341 @@ function M.rollback(id, version)
 end
 
 -- =========================
+-- Statistics (按类型/标签计数)
+-- =========================
+function M.statistics()
+	ensure_db()
+
+	-- 按类型统计
+	local type_rows = db_safe_eval([[
+		SELECT type, COUNT(*) as count 
+		FROM knowledge 
+		GROUP BY type 
+		ORDER BY count DESC
+	]])
+
+	-- 按标签统计
+	local tag_rows = db_safe_eval([[
+		SELECT tags FROM knowledge WHERE tags != ''
+	]])
+
+	local tag_counts = {}
+	if tag_rows then
+		for _, row in ipairs(tag_rows) do
+			local tags = split_tags(row.tags)
+			for _, tag in ipairs(tags) do
+				tag_counts[tag] = (tag_counts[tag] or 0) + 1
+			end
+		end
+	end
+
+	-- 总数
+	local total_rows = db_safe_eval("SELECT COUNT(*) as count FROM knowledge")
+	local total = total_rows and total_rows[1] and total_rows[1].count or 0
+
+	-- 格式化输出
+	local lines = {
+		"=== 知识库统计 ===",
+		"",
+		string.format("总记录数: %d", total),
+		"",
+		"--- 按类型分布 ---",
+	}
+
+	if type_rows then
+		for _, row in ipairs(type_rows) do
+			local pct = total > 0 and string.format("%.1f%%", row.count / total * 100) or "0%"
+			table.insert(lines, string.format("  %-10s %d (%s)", row.type, row.count, pct))
+		end
+	end
+
+	table.insert(lines, "")
+	table.insert(lines, "--- 标签 Top 10 ---")
+
+	-- 排序标签
+	local sorted_tags = {}
+	for tag, count in pairs(tag_counts) do
+		table.insert(sorted_tags, { tag = tag, count = count })
+	end
+	table.sort(sorted_tags, function(a, b) return a.count > b.count end)
+
+	for i = 1, math.min(10, #sorted_tags) do
+		table.insert(lines, string.format("  #%-15s %d", sorted_tags[i].tag, sorted_tags[i].count))
+	end
+
+	-- 显示在窗口中
+	local buf = vim.api.nvim_create_buf(false, true)
+	vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+
+	local width = 60
+	local height = #lines + 2
+	local win = vim.api.nvim_open_win(buf, true, {
+		relative = "editor",
+		width = width,
+		height = height,
+		row = math.floor((vim.o.lines - height) / 2),
+		col = math.floor((vim.o.columns - width) / 2),
+		border = "rounded",
+		style = "minimal",
+		title = " 知识库统计 ",
+		title_pos = "center",
+	})
+
+	vim.api.nvim_set_option_value("modifiable", false, { buf = buf })
+	vim.api.nvim_set_option_value("filetype", "markdown", { buf = buf })
+
+	vim.keymap.set("n", "q", function()
+		vim.api.nvim_win_close(win, true)
+		vim.api.nvim_buf_delete(buf, { force = true })
+	end, { buffer = buf })
+
+	vim.notify("按 q 关闭窗口", vim.log.levels.INFO)
+end
+
+-- =========================
+-- Export / Import
+-- =========================
+
+--- 导出知识库数据
+--- @param format string "json" | "markdown" | "jsonl"
+function M.export(format)
+	ensure_db()
+	format = format or "json"
+
+	local rows = db_safe_eval([[
+		SELECT id, time, type, tags, title, content 
+		FROM knowledge 
+		ORDER BY id
+	]])
+
+	if not rows or #rows == 0 then
+		vim.notify("知识库为空", vim.log.levels.WARN)
+		return
+	end
+
+	local export_path
+	if format == "json" then
+		-- 导出为 JSON 数组
+		local json_data = {}
+		for _, row in ipairs(rows) do
+			table.insert(json_data, {
+				id = row.id,
+				time = row.time,
+				type = row.type,
+				tags = split_tags(row.tags),
+				title = row.title,
+				content = row.content,
+			})
+		end
+
+		local json_str = vim.json.encode(json_data)
+		export_path = vim.fn.expand("~/knowledge_export_" .. os.date("%Y%m%d_%H%M%S") .. ".json")
+		local f = io.open(export_path, "w")
+		if f then
+			f:write(json_str)
+			f:close()
+		else
+			vim.notify("无法写入文件: " .. export_path, vim.log.levels.ERROR)
+			return
+		end
+
+	elseif format == "jsonl" then
+		-- 导出为 JSONL (每行一个 JSON 对象)
+		export_path = vim.fn.expand("~/knowledge_export_" .. os.date("%Y%m%d_%H%M%S") .. ".jsonl")
+		local f = io.open(export_path, "w")
+		if f then
+			for _, row in ipairs(rows) do
+				local line = vim.json.encode({
+					id = row.id,
+					time = row.time,
+					type = row.type,
+					tags = split_tags(row.tags),
+					title = row.title,
+					content = row.content,
+				})
+				f:write(line .. "\n")
+			end
+			f:close()
+		else
+			vim.notify("无法写入文件: " .. export_path, vim.log.levels.ERROR)
+			return
+		end
+
+	elseif format == "markdown" then
+		-- 导出为 Markdown 文档
+		export_path = vim.fn.expand("~/knowledge_export_" .. os.date("%Y%m%d_%H%M%S") .. ".md")
+		local f = io.open(export_path, "w")
+		if f then
+			f:write("# 知识库导出\n\n")
+			f:write(string.format("导出时间: %s\n\n", os.date("%Y-%m-%d %H:%M:%S")))
+			f:write(string.format("总记录数: %d\n\n", #rows))
+			f:write("---\n\n")
+
+			for _, row in ipairs(rows) do
+				f:write(string.format("## [%d] %s\n\n", row.id, row.title or "Untitled"))
+				f:write(string.format("- 时间: %s\n", row.time))
+				f:write(string.format("- 类型: %s\n", row.type))
+				if row.tags and row.tags ~= "" then
+					f:write(string.format("- 标签: %s\n", row.tags))
+				end
+				f:write("\n")
+				f:write(row.content or "")
+				f:write("\n\n---\n\n")
+			end
+			f:close()
+		else
+			vim.notify("无法写入文件: " .. export_path, vim.log.levels.ERROR)
+			return
+		end
+	else
+		vim.notify("不支持的格式: " .. format .. " (支持: json, jsonl, markdown)", vim.log.levels.ERROR)
+		return
+	end
+
+	vim.notify(string.format("已导出到: %s (%d 条记录)", export_path, #rows), vim.log.levels.INFO)
+end
+
+--- 导入知识库数据
+--- @param file_path string 文件路径
+function M.import(file_path)
+	ensure_db()
+	file_path = vim.fn.expand(file_path)
+
+	if vim.fn.filereadable(file_path) == 0 then
+		vim.notify("文件不存在: " .. file_path, vim.log.levels.ERROR)
+		return
+	end
+
+	local ext = vim.fn.fnamemodify(file_path, ":e")
+	local count = 0
+
+	if ext == "json" then
+		-- 导入 JSON 数组
+		local f = io.open(file_path, "r")
+		if not f then
+			vim.notify("无法读取文件", vim.log.levels.ERROR)
+			return
+		end
+		local content = f:read("*all")
+		f:close()
+
+		local ok, data = pcall(vim.json.decode, content)
+		if not ok or type(data) ~= "table" then
+			vim.notify("JSON 解析失败", vim.log.levels.ERROR)
+			return
+		end
+
+		for _, item in ipairs(data) do
+			db_safe_insert("knowledge", {
+				time = item.time or os.date("%Y-%m-%d %H:%M:%S"),
+				type = item.type or "text",
+				tags = type(item.tags) == "table" and table.concat(item.tags, ",") or "",
+				title = item.title or "",
+				content = item.content or "",
+			})
+			count = count + 1
+		end
+
+	elseif ext == "jsonl" then
+		-- 导入 JSONL
+		for line in io.lines(file_path) do
+			local ok, obj = pcall(vim.json.decode, line)
+			if ok and obj then
+				db_safe_insert("knowledge", {
+					time = obj.time or os.date("%Y-%m-%d %H:%M:%S"),
+					type = obj.type or "text",
+					tags = type(obj.tags) == "table" and table.concat(obj.tags, ",") or "",
+					title = obj.title or "",
+					content = obj.content or "",
+				})
+				count = count + 1
+			end
+		end
+
+	elseif ext == "md" then
+		vim.notify("Markdown 导入暂不支持", vim.log.levels.WARN)
+		return
+	else
+		vim.notify("不支持的文件格式: " .. ext, vim.log.levels.ERROR)
+		return
+	end
+
+	vim.notify(string.format("已导入 %d 条记录", count), vim.log.levels.INFO)
+end
+
+-- =========================
 -- setup
 -- =========================
-function M.setup()
+function M.setup(opts)
+	opts = opts or {}
 	ensure_db()
-	vim.keymap.set("v", "<leader>is", M.save_visual_selection, { desc = "Save visual selection" })
-	vim.keymap.set("n", "<leader>iv", M.paste_from_clipboard, { desc = "Save clipboard" })
-	vim.keymap.set("n", "<leader>ip", M.open_paste_window, { desc = "Paste window" })
-	vim.keymap.set("n", "<leader>ik", M.open, { desc = "Knowledge search" })
-	vim.keymap.set("n", "<leader>im", M.migrate_from_jsonl, { desc = "Migrate JSONL" })
-	vim.keymap.set("n", "<leader>ir", M.rebuild_fts, { desc = "Rebuild FTS index (trigram)" })
-	vim.keymap.set("n", "<leader>ih", function()
+
+	-- 默认键映射
+	local default_keymaps = {
+		save_visual = "<leader>is",
+		save_clipboard = "<leader>iv",
+		paste_window = "<leader>ip",
+		knowledge_search = "<leader>ik",
+		migrate = "<leader>im",
+		rebuild_fts = "<leader>ir",
+		history = "<leader>ih",
+		statistics = "<leader>ist",
+		export = "<leader>ie",
+		import = "<leader>ii",
+	}
+
+	-- 合并用户配置
+	local keymaps = vim.tbl_extend("keep", opts.keymaps or {}, default_keymaps)
+
+	vim.keymap.set("v", keymaps.save_visual, M.save_visual_selection, { desc = "Save visual selection" })
+	vim.keymap.set("n", keymaps.save_clipboard, M.paste_from_clipboard, { desc = "Save clipboard" })
+	vim.keymap.set("n", keymaps.paste_window, M.open_paste_window, { desc = "Paste window" })
+	vim.keymap.set("n", keymaps.knowledge_search, M.open, { desc = "Knowledge search" })
+	vim.keymap.set("n", keymaps.migrate, M.migrate_from_jsonl, { desc = "Migrate JSONL" })
+	vim.keymap.set("n", keymaps.rebuild_fts, M.rebuild_fts, { desc = "Rebuild FTS index (trigram)" })
+	vim.keymap.set("n", keymaps.history, function()
 		local id = vim.fn.input("Knowledge ID: ")
 		M.history_ui(tonumber(id))
-	end, { desc = "history" })
+	end, { desc = "View history" })
+	vim.keymap.set("n", keymaps.statistics, M.statistics, { desc = "Knowledge statistics" })
+	vim.keymap.set("n", keymaps.export, function()
+		local format = vim.fn.input("Format (json/jsonl/markdown): ", "json")
+		if format ~= "" then
+			M.export(format)
+		end
+	end, { desc = "Export knowledge base" })
+	vim.keymap.set("n", keymaps.import, function()
+		local path = vim.fn.input("File path: ", "~/knowledge_export.json")
+		if path ~= "" then
+			M.import(path)
+		end
+	end, { desc = "Import knowledge base" })
+
+	-- 添加命令支持
+	vim.api.nvim_create_user_command("KnowledgeList", function()
+		M.open()
+	end, { desc = "Open knowledge base search" })
+
+	vim.api.nvim_create_user_command("KnowledgeStats", function()
+		M.statistics()
+	end, { desc = "Show knowledge statistics" })
+
+	vim.api.nvim_create_user_command("KnowledgeExport", function(opts)
+		local format = opts.args ~= "" and opts.args or "json"
+		M.export(format)
+	end, { nargs = "?", desc = "Export knowledge base (json/jsonl/markdown)" })
+
+	vim.api.nvim_create_user_command("KnowledgeImport", function(opts)
+		if opts.args == "" then
+			vim.notify("请提供文件路径", vim.log.levels.ERROR)
+			return
+		end
+		M.import(opts.args)
+	end, { nargs = 1, desc = "Import knowledge base from file" })
+
+	vim.api.nvim_create_user_command("KnowledgeRebuildFTS", function()
+		M.rebuild_fts()
+	end, { desc = "Rebuild FTS index" })
 end
 
 return M
