@@ -1084,57 +1084,142 @@ function M.history_ui(id)
 
 	local pickers = require("telescope.pickers")
 	local finders = require("telescope.finders")
+	local previewers = require("telescope.previewers")
 	local conf = require("telescope.config").values
 	local actions = require("telescope.actions")
 	local action_state = require("telescope.actions.state")
 
 	pickers
 		.new({}, {
-			prompt_title = "History #" .. id,
+			prompt_title = string.format("History #%d (共 %d 个版本)", id, #rows),
 			finder = finders.new_table({
 				results = rows,
 				entry_maker = function(entry)
 					return {
 						value = entry,
-						display = string.format("v%-3d  %s  %s", entry.version, entry.time, (entry.title or "")),
-						ordinal = tostring(entry.version),
+						display = string.format(
+							"v%-4d | %-19s | %s",
+							entry.version,
+							entry.time,
+							(entry.title or ""):sub(1, 60)
+						),
+						ordinal = tostring(entry.version) .. " " .. (entry.title or ""),
 					}
 				end,
 			}),
 
 			sorter = conf.generic_sorter({}),
 
+			previewer = previewers.new_buffer_previewer({
+				title = "版本预览",
+				define_preview = function(self, entry)
+					local bufnr = self.state.bufnr
+					local winid = self.state.winid
+					local value = entry.value
+
+					-- 构建预览头部
+					local header = {
+						"╭──────────────────────────────────────────────╮",
+						string.format("│ 版本: v%-4d  时间: %-19s │", value.version, value.time),
+						string.format("│ 标题: %-52s │", (value.title or ""):sub(1, 52)),
+						"╰──────────────────────────────────────────────╯",
+						"",
+						"─── 内容预览 ───",
+						"",
+					}
+
+					-- 获取内容并限制行数
+					local content_lines = vim.split(value.content or "", "\n")
+					local max_lines = 100
+					if #content_lines > max_lines then
+						table.insert(content_lines, "")
+						table.insert(content_lines, string.format("... (共 %d 行，仅显示前 %d 行)", #content_lines - 2, max_lines))
+					end
+
+					vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, vim.list_extend(header, content_lines))
+					vim.api.nvim_set_option_value("filetype", "markdown", { buf = bufnr })
+					vim.api.nvim_set_option_value("wrap", true, { win = winid })
+					vim.api.nvim_set_option_value("linebreak", true, { win = winid })
+
+					-- Treesitter 高亮
+					pcall(function()
+						vim.treesitter.start(bufnr, "markdown")
+					end)
+				end,
+			}),
+
 			attach_mappings = function(prompt_bufnr, map)
-				local function preview_version()
-					local selection = action_state.get_selected_entry()
-					local v = selection.value
-
-					-- diff preview（简单版）
-					local buf = vim.api.nvim_create_buf(false, true)
-					vim.api.nvim_buf_set_lines(buf, 0, -1, false, vim.split(v.content, "\n"))
-
-					vim.api.nvim_open_win(buf, true, {
-						relative = "win", -- 1. 改为相对于 Telescope 主窗口
-						width = math.floor(vim.o.columns * 0.8),
-						height = math.floor(vim.o.lines * 0.8),
-						row = 0, -- 2. 添加行坐标
-						col = 0, -- 3. 添加列坐标
-						style = "minimal", -- 4. 使用极简样式，去除边框等干扰
-						border = "rounded", -- 如果你想保留边框，可以保留此项
-					})
-				end
-
 				local function rollback()
 					local selection = action_state.get_selected_entry()
 					local v = selection.value
 
-					M.rollback(id, v.version)
-					actions.close(prompt_bufnr)
+					local confirm = vim.fn.confirm(
+						string.format("确认回滚到版本 v%d?\n标题: %s", v.version, v.title or ""),
+						"&Yes\n&No",
+						2
+					)
+					if confirm == 1 then
+						M.rollback(id, v.version)
+						actions.close(prompt_bufnr)
+					end
 				end
 
-				map("i", "<CR>", preview_version)
-				map("n", "<CR>", preview_version)
+				local function diff_with_current()
+					local selection = action_state.get_selected_entry()
+					if not selection then
+						return
+					end
+					local v = selection.value
 
+					-- 获取当前内容
+					local cur_rows = db_safe_eval("SELECT content FROM knowledge WHERE id = ?", { id })
+					if not cur_rows or #cur_rows == 0 then
+						vim.notify("当前记录不存在", vim.log.levels.ERROR)
+						return
+					end
+					local cur_content = cur_rows[1].content
+
+					-- 创建 diff 窗口
+					local buf1 = vim.api.nvim_create_buf(false, true)
+					local buf2 = vim.api.nvim_create_buf(false, true)
+
+					vim.api.nvim_buf_set_lines(buf1, 0, -1, false, vim.split(cur_content, "\n"))
+					vim.api.nvim_buf_set_lines(buf2, 0, -1, false, vim.split(v.content, "\n"))
+
+					local width = math.floor(vim.o.columns * 0.9)
+					local height = math.floor(vim.o.lines * 0.7)
+					local row = math.floor((vim.o.lines - height) / 2)
+					local col = math.floor((vim.o.columns - width) / 2)
+
+					local win = vim.api.nvim_open_win(buf1, true, {
+						relative = "editor",
+						width = width,
+						height = height,
+						row = row,
+						col = col,
+						border = "rounded",
+						style = "minimal",
+						title = string.format("Diff: 当前 vs 历史 v%d", v.version),
+						title_pos = "center",
+					})
+
+					vim.api.nvim_set_option_value("filetype", "markdown", { buf = buf1 })
+					vim.api.nvim_set_option_value("filetype", "markdown", { buf = buf2 })
+
+					vim.cmd("vertical diffsplit " .. vim.api.nvim_buf_get_name(buf2))
+
+					vim.keymap.set("n", "q", function()
+						vim.cmd("diffoff!")
+						vim.api.nvim_win_close(win, true)
+						vim.api.nvim_buf_delete(buf1, { force = true })
+						vim.api.nvim_buf_delete(buf2, { force = true })
+					end, { buffer = buf1 })
+				end
+
+				map("i", "<CR>", rollback)
+				map("n", "<CR>", rollback)
+				map("i", "<C-d>", diff_with_current)
+				map("n", "<C-d>", diff_with_current)
 				map("i", "<C-r>", rollback)
 				map("n", "<C-r>", rollback)
 
