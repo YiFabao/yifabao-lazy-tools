@@ -57,8 +57,16 @@ local function cache_get(cache, key)
 	return nil
 end
 
+local function cache_size(cache)
+	local count = 0
+	for _ in pairs(cache) do
+		count = count + 1
+	end
+	return count
+end
+
 local function cache_set(cache, key, value)
-	if next(cache) >= CACHE_MAX_SIZE then
+	if cache_size(cache) >= CACHE_MAX_SIZE then
 		-- Simple LRU: remove oldest entry
 		local oldest_key, oldest_entry = nil, nil
 		for k, v in pairs(cache) do
