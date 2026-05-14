@@ -473,9 +473,12 @@ local function save_content(content, opts)
 
 	if not tags then
 		tags = detect_tags(text)
-		if type(tags) == "string" then
-			tags = split_tags(tags)
-		end
+	end
+	-- 确保 tags 是 table
+	if type(tags) == "string" then
+		tags = split_tags(tags)
+	elseif type(tags) ~= "table" then
+		tags = {}
 	end
 
 	local tag_str = table.concat(tags, ",")
