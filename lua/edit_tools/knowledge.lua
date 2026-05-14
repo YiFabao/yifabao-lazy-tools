@@ -705,44 +705,32 @@ function M.paste_from_clipboard()
 		return
 	end
 
-	local detected_tags = detect_tags(content)
-	local default_tags = table.concat(detected_tags, ", ")
+	-- 智能生成标题
+	local title
+	-- 尝试提取有意义的行（跳过空行和纯分隔符行）
+	for line in content:gmatch("[^\n]+") do
+		local trimmed = vim.trim(line)
+		if trimmed ~= "" and not trimmed:match("^[=-]+$") and not trimmed:match("^#+$") then
+			title = trimmed:sub(1, 80)
+			break
+		end
+	end
+	if not title or title == "" then
+		title = content:sub(1, 80)
+	end
 
-	local initial_lines = {
-		"=== Title ===",
-		"",
-		"",
-		"=== Tags (用逗号分隔) ===",
-		default_tags ~= "" and default_tags or "",
-		"",
-	}
+	-- 自动检测标签
+	local tags = detect_tags(content)
 
-	create_input_window({
-		title = " 保存知识 - 输入标题和标签 ",
-		footer = " <C-s> 保存     q 退出 ",
-		initial_lines = initial_lines,
-		width = math.floor(vim.o.columns * 0.6),
-		height = 10,
-		on_save = function(buf, win, state)
-			local buf_lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
-			local title = buf_lines[2] or ""
-			local tags = buf_lines[5] or ""
-			local tags_list = split_tags(tags)
-
-			local saved_id = save_content(content, {
-				id = state.id,
-				title = vim.trim(title) ~= "" and vim.trim(title) or nil,
-				tags = #tags_list > 0 and tags_list or nil,
-			})
-
-			if not state.id then
-				state.id = saved_id
-			end
-
-			vim.api.nvim_win_close(win, true)
-			vim.api.nvim_buf_delete(buf, { force = true })
-		end,
+	-- 直接保存，无需弹窗
+	local saved_id = save_content(content, {
+		title = title,
+		tags = tags,
 	})
+
+	if saved_id then
+		vim.notify(string.format("已保存 #%d | %s", saved_id, title), vim.log.levels.INFO)
+	end
 end
 
 function M.rebuild_fts()
