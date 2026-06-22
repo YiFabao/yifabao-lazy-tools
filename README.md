@@ -1,6 +1,6 @@
 # Edit Tools - Neovim 效率工具集
 
-一个强大的 Neovim 插件集合，包含 IP 地址提取/格式化和知识库管理功能。
+一个强大的 Neovim 插件集合，包含 IP 地址提取/格式化、知识库管理和文本清理功能。
 
 ## 功能特性
 
@@ -93,6 +93,34 @@
 :KnowledgeTemplate      " 使用模板保存
 ```
 
+### ✂️ 文本清理工具 (`strip.lua`)
+
+#### 去标点
+一键去除选区中的所有标点符号（引号、逗号、括号、冒号等中英文标点）。
+
+- ✅ 支持中英文标点
+- ✅ 保留文字内容和空格
+- ✅ 视觉选区操作
+- ✅ 完整的撤销支持
+
+**默认键映射：** `<leader>iq`
+
+#### 行格式化
+对选区每行执行：去除首尾空格 → 加双引号 → 加逗号（最后一行不加逗号）。空行自动跳过。
+
+示例：
+```
+  hello world     →  "hello world",
+  foo bar         →  "foo bar",
+  baz             →  "baz"
+```
+
+- ✅ 自动跳过空行
+- ✅ 最后一行不加逗号
+- ✅ 完整的撤销支持
+
+**默认键映射：** `<leader>iL`
+
 ## 安装
 
 使用 [lazy.nvim](https://github.com/folke/lazy.nvim):
@@ -128,6 +156,10 @@
           auto_backup = "<leader>ib",
           list_backups = "<leader>il",
         },
+      },
+      strip = {
+        strip_keymap = "<leader>iq",       -- 去标点快捷键
+        format_keymap = "<leader>iL",      -- 行格式化快捷键
       },
     })
   end,

@@ -23,6 +23,9 @@ function M.setup(opts)
 
 	-- 初始化知识库
 	require("edit_tools.knowledge").setup(opts.knowledge or {})
+
+	-- 初始化文本清理工具（去标点 + 行格式化）
+	require("edit_tools.strip").setup(opts.strip or {})
 end
 
 return M
