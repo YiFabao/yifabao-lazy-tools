@@ -28,6 +28,7 @@ function M.strip_punctuation()
 	local results = {}
 	for _, line in ipairs(lines) do
 		local cleaned = line:gsub(PUNCTUATION_PATTERN, "")
+		cleaned = vim.trim(cleaned)
 		table.insert(results, cleaned)
 	end
 
