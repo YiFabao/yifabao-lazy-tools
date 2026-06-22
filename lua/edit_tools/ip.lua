@@ -57,7 +57,7 @@ end
 --- @param opts table|nil 可选配置 { format = "cidr"|"ip"|"both", sort = boolean }
 function M.format_selected_ips(opts)
 	opts = opts or {}
-	local format_mode = opts.format or "cidr"  -- cidr, ip, both
+	local format_mode = opts.format or "both"  -- cidr, ip, both
 	local should_sort = opts.sort ~= false  -- 默认开启排序
 
 	local bufnr = 0
