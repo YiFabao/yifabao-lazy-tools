@@ -4,7 +4,10 @@ local M = {}
 -- 需要去除的标点符号字符集
 -- 包含：中英文引号、逗号、句号、括号、方括号、花括号、冒号、分号等
 -- Lua pattern 字符集内转义用 % 不是 \，] 必须写成 %]，[ 必须写成 %[
-local PUNCTUATION_PATTERN = [=[[""'',，。.、;；:：!！?？()（）%[%]{}【】《》<>`~@#%^&*_+=|\\/·—…%-]]=]
+-- 用于去除首尾标点（保留内容中间的）
+local STRIP_CHARS = [["'""'，,。.、;；:：!！?？()（）%[%]{}【】《》<>`~@#%^&*_+=|\\/·—…%-]]
+local STRIP_LEADING = "^[" .. STRIP_CHARS .. "%s]+"
+local STRIP_TRAILING = "[" .. STRIP_CHARS .. "%s]+$"
 
 --- 获取视觉选区的行范围（0-indexed start, exclusive end）
 --- @return number, number
@@ -18,7 +21,7 @@ local function get_visual_range()
 	return start_pos[2] - 1, end_pos[2]
 end
 
---- 去除选区中所有标点符号
+--- 去除选区首尾标点符号（保留内容中间的标点）
 function M.strip_punctuation()
 	local bufnr = 0
 	local start_line, end_line = get_visual_range()
@@ -27,14 +30,13 @@ function M.strip_punctuation()
 
 	local results = {}
 	for _, line in ipairs(lines) do
-		local cleaned = line:gsub(PUNCTUATION_PATTERN, "")
-		cleaned = vim.trim(cleaned)
+		local cleaned = line:gsub(STRIP_LEADING, ""):gsub(STRIP_TRAILING, "")
 		table.insert(results, cleaned)
 	end
 
 	vim.api.nvim_buf_set_lines(bufnr, start_line, end_line, false, results)
 
-	vim.notify("已去除选区中的标点符号", vim.log.levels.INFO)
+	vim.notify("已去除选区首尾标点符号", vim.log.levels.INFO)
 end
 
 --- 每行去除首尾空格，加双引号，加逗号（最后一行不加逗号）
